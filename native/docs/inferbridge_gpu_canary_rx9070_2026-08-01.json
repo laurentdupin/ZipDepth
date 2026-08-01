@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "familyId": "zipdepth",
+  "publicFamilyName": "ZipDepth",
+  "harnessApi": "2.0",
+  "device": "AMD Radeon RX 9070",
+  "adapterSelection": "exact-d3d12-luid-to-vulkan-device",
+  "input": "Core-owned shared D3D12 BGRA8 texture plus wait fence",
+  "output": "Core-owned shared D3D12 R32_FLOAT texture plus signal fence",
+  "maximumSubmitReturnMs": 1.383,
+  "submitReturnGateMs": 5.0,
+  "tensorUploadByteDelta": 0,
+  "tensorDownloadByteDelta": 0,
+  "zeroHostTransfers": true,
+  "sourceFrameId": 7007,
+  "queueWideIdleCalls": 0,
+  "productCanary": {
+    "path": "DeepDesktopGodot/Tests/SmokeInferBridgeNativeGpu.gd",
+    "serverOutputs": 182,
+    "serverMeasuredOutputs": 179,
+    "serverMaximumSubmitReturnMs": 1.339,
+    "mobileOutputs": 181,
+    "mobileMeasuredOutputs": 178,
+    "mobileMaximumSubmitReturnMs": 1.383,
+    "outputDimensions": [2560, 1440],
+    "importedPixelFormat": "R32_FLOAT",
+    "finiteVariation": true,
+    "correlation": true
+  },
+  "variants": [
+    {
+      "id": "base-gpu",
+      "modelKind": "server-convex",
+      "status": "passed",
+      "cpuReferenceMaxAbs": 7.4505806e-8,
+      "vulkanReferenceMaxAbs": 8.94069672e-8
+    },
+    {
+      "id": "base-mobile",
+      "modelKind": "npu-mobile-unfold-free",
+      "status": "passed",
+      "cpuReferenceMaxAbs": 7.4505806e-8,
+      "vulkanReferenceMaxAbs": 6.70552254e-8
+    }
+  ],
+  "commands": [
+    "python native/tests/numerical_parity.py --dll native/out/vulkan/Release/zipdepth_native.dll --checkpoint checkpoints/zipdepth_base.pth --model native/out/models/zipdepth_base.zipd",
+    "python native/tests/numerical_parity.py --dll native/out/vulkan/Release/zipdepth_native.dll --checkpoint checkpoints/zipdepth_base_npu.pth --model native/out/models/zipdepth_base_mobile.zipd --mobile",
+    "$env:ZIPDEPTH_MODEL=(Resolve-Path native/out/models/zipdepth_base.zipd); native/out/vulkan/Release/zipdepth_d3d12_full_graph.exe",
+    "$env:ZIPDEPTH_MODEL=(Resolve-Path native/out/models/zipdepth_base_mobile.zipd); native/out/vulkan/Release/zipdepth_d3d12_full_graph.exe"
+  ]
+}
