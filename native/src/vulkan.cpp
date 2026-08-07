@@ -407,7 +407,14 @@ VulkanContext::VulkanContext(
         family->timestampValidBits != 0;
     timestamp_period_ns_ = properties.limits.timestampPeriod;
 
+#if defined(__ANDROID__)
+    // Inference is a background producer for an interactive stereo renderer.
+    // Give the platform scheduler room to service Godot's presentation queue
+    // instead of letting long compute batches monopolize the Quest GPU.
+    constexpr float priority = 0.0f;
+#else
     constexpr float priority = 1.0f;
+#endif
     const VkDeviceQueueCreateInfo queue_info{
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
         nullptr,
