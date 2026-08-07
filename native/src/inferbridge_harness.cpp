@@ -178,6 +178,19 @@ bool input_size(
     return true;
 }
 
+void network_dimensions(
+    uint32_t input_width, uint32_t input_height, uint32_t network_size,
+    uint32_t& width, uint32_t& height) {
+    const double scale = static_cast<double>(network_size) /
+        static_cast<double>(std::min(input_width, input_height));
+    const auto aligned_size = [](double value) {
+        return std::max(32u, static_cast<uint32_t>(
+            std::llround(value / 32.0) * 32.0));
+    };
+    width = aligned_size(input_width * scale);
+    height = aligned_size(input_height * scale);
+}
+
 ibrh_result status_result(zipdepth_status status) {
     switch (status) {
         case ZIPDEPTH_STATUS_OK: return IBRH_OK;
@@ -245,16 +258,12 @@ public:
     }
 
 private:
-    static uint32_t aligned_size(double value) {
-        return std::max(32u, static_cast<uint32_t>(
-            std::llround(value / 32.0) * 32.0));
-    }
-
     void execute(const Work& work) {
-        const double scale = static_cast<double>(work.network_size) /
-            static_cast<double>(std::min(work.width, work.height));
-        const uint32_t network_width = aligned_size(work.width * scale);
-        const uint32_t network_height = aligned_size(work.height * scale);
+        uint32_t network_width = 0u;
+        uint32_t network_height = 0u;
+        network_dimensions(
+            work.width, work.height, work.network_size,
+            network_width, network_height);
         const uint64_t plane = static_cast<uint64_t>(network_width) *
             network_height;
         std::vector<float> rgb(static_cast<size_t>(plane) * 3u);
@@ -285,16 +294,12 @@ private:
             temporary.data(), temporary.size());
         if (result != ZIPDEPTH_STATUS_OK)
             throw std::runtime_error(zipdepth_last_error());
-        for (uint32_t y = 0; y < work.height; ++y) {
-            const uint32_t source_y = y * network_height / work.height;
-            for (uint32_t x = 0; x < work.width; ++x) {
-                const uint32_t source_x = x * network_width / work.width;
-                work.destination[
-                    static_cast<uint64_t>(y) * work.destination_stride + x] =
-                    temporary[static_cast<uint64_t>(source_y) *
-                        network_width + source_x];
-            }
-        }
+        for (uint32_t y = 0; y < network_height; ++y)
+            std::copy_n(
+                temporary.data() + static_cast<uint64_t>(y) * network_width,
+                network_width,
+                work.destination +
+                    static_cast<uint64_t>(y) * work.destination_stride);
     }
 
     void run() {
@@ -615,8 +620,18 @@ ibrh_result IBRH_CALL model_plan_outputs(
     const auto result = model_get_port(model, IBRH_PORT_OUTPUT, 0u,
                                        sizeof(outputs[0]), &outputs[0]);
     if (result != IBRH_OK) return result;
-    outputs[0].width = request->inputs[0].width;
-    outputs[0].height = request->inputs[0].height;
+    uint32_t network_size = model->input_size;
+    if (!input_size(
+            copy_string(request->parameters_json), network_size, network_size))
+        return IBRH_ERROR_INVALID_ARGUMENT;
+    if (request->inputs[0].domain == IBRH_RESOURCE_DOMAIN_HOST) {
+        network_dimensions(
+            request->inputs[0].width, request->inputs[0].height, network_size,
+            outputs[0].width, outputs[0].height);
+    } else {
+        outputs[0].width = request->inputs[0].width;
+        outputs[0].height = request->inputs[0].height;
+    }
     outputs[0].flags = 0u;
     return IBRH_OK;
 }
@@ -641,8 +656,15 @@ ibrh_result IBRH_CALL submit(
     if (!input_size(copy_string(request->parameters_json), network_size, network_size))
         return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
                     "ZipDepth Size must be an integer from 1 to 4096");
-    if (!input.width || !input.height || destination.width != input.width ||
-        destination.height != input.height ||
+    uint32_t expected_width = input.width;
+    uint32_t expected_height = input.height;
+    if (input.domain == IBRH_RESOURCE_DOMAIN_HOST)
+        network_dimensions(
+            input.width, input.height, network_size,
+            expected_width, expected_height);
+    if (!input.width || !input.height ||
+        destination.width != expected_width ||
+        destination.height != expected_height ||
         destination.pixel_format != IBRH_PIXEL_DEPTH_FLOAT32)
         return IBRH_ERROR_INVALID_ARGUMENT;
     const uint64_t input_bytes =
@@ -729,7 +751,7 @@ ibrh_result IBRH_CALL submit(
     job->gpu_admission = model->host_admissions;
     job->source_frame_id = request->source_frame_id;
     job->timestamp_ns = request->timestamp_ns;
-    job->width = input.width; job->height = input.height;
+    job->width = destination.width; job->height = destination.height;
     if (!model->host_worker || !model->host_worker->enqueue({
             job, model->context, pixels, input.width, input.height,
             input.row_stride_bytes, input.pixel_format == IBRH_PIXEL_RGBA8,

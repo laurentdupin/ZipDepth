@@ -103,7 +103,6 @@ int main(int argc, char** argv) {
 
     const std::uint64_t pixels = static_cast<std::uint64_t>(width) * height;
     std::vector<std::uint8_t> image(static_cast<std::size_t>(pixels) * 4u);
-    std::vector<float> depth(static_cast<std::size_t>(pixels));
     for (std::uint32_t y = 0; y < height; ++y) {
         for (std::uint32_t x = 0; x < width; ++x) {
             std::uint8_t* pixel = image.data() +
@@ -140,12 +139,30 @@ int main(int argc, char** argv) {
     input.resource = resource(
         IBRH_RESOURCE_ACCESS_READ, IBRH_PIXEL_BGRA8, width * 4u,
         image.size(), image.data());
+    ibrh_output_plan_request plan_request{};
+    plan_request.struct_size = sizeof(plan_request);
+    plan_request.api_version = IBRH_CURRENT_API_VERSION;
+    plan_request.inputs = &input.resource;
+    plan_request.input_count = 1u;
+    plan_request.parameters_json = view(parameters);
+    ibrh_port_descriptor planned_output{};
+    result = api.model_plan_outputs(
+        model, sizeof(plan_request), &plan_request, 1u, &planned_output);
+    if (result != IBRH_OK || planned_output.width == 0u ||
+        planned_output.height == 0u)
+        return fail("model_plan_outputs failed", result);
+    const std::uint64_t output_pixels =
+        static_cast<std::uint64_t>(planned_output.width) * planned_output.height;
+    std::vector<float> depth(static_cast<std::size_t>(output_pixels));
     ibrh_transfer_binding output{};
     output.struct_size = sizeof(output);
     output.api_version = IBRH_CURRENT_API_VERSION;
     output.resource = resource(
         IBRH_RESOURCE_ACCESS_WRITE, IBRH_PIXEL_DEPTH_FLOAT32,
-        width * sizeof(float), depth.size() * sizeof(float), depth.data());
+        planned_output.width * sizeof(float), depth.size() * sizeof(float),
+        depth.data());
+    output.resource.width = planned_output.width;
+    output.resource.height = planned_output.height;
 
     double total_ms = 0.0, minimum_ms = 1.0e30, maximum_ms = 0.0;
     double maximum_submit_ms = 0.0;
@@ -196,10 +213,12 @@ int main(int argc, char** argv) {
     }
     const double mean_ms = total_ms / iterations;
     std::printf(
-        "load_ms=%.3f width=%u height=%u size=%u warmup=%u iterations=%u "
+        "load_ms=%.3f width=%u height=%u output_width=%u output_height=%u "
+        "size=%u warmup=%u iterations=%u "
         "mean_ms=%.3f min_ms=%.3f max_ms=%.3f fps=%.3f "
         "max_submit_ms=%.3f output_min=%.9g output_max=%.9g\n",
-        load_ms, width, height, size, warmup, iterations,
+        load_ms, width, height, planned_output.width, planned_output.height,
+        size, warmup, iterations,
         mean_ms, minimum_ms, maximum_ms, 1000.0 / mean_ms,
         maximum_submit_ms, output_min, output_max);
     api.model_unload(model);
