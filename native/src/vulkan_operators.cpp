@@ -227,7 +227,7 @@ void VulkanOperators::conv(
                 spatial4_tiled && !spatial4_tiled_small ? 16 : 8),
         pointwise_residual
             ? divide_up(output_channels, 64)
-            : divide_up(output_height, spatial4_tiled_small ? 4 : 8),
+            : divide_up(output_height, spatial4_tiled ? 4 : 8),
         pointwise_residual
             ? 1
             : pointwise

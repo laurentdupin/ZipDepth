@@ -21,7 +21,8 @@ if(ZIPDEPTH_WITH_VULKAN)
             set(SOURCE_NAME "${ARGV1}")
         endif()
         if(ARGC GREATER 2)
-            list(APPEND EXTRA_ARGUMENTS "${ARGV2}")
+            set(EXTRA_ARGUMENTS ${ARGN})
+            list(POP_FRONT EXTRA_ARGUMENTS)
         endif()
         set(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${SOURCE_NAME}.glsl")
         set(SPIRV "${ZIPDEPTH_GENERATED_DIR}/${NAME}.spv")
@@ -45,10 +46,12 @@ if(ZIPDEPTH_WITH_VULKAN)
     zipdepth_compile_shader(conv2d_pointwise_gemm_residual conv2d_pointwise_gemm -DADD_RESIDUAL=1)
     zipdepth_compile_shader(conv2d_depthwise3 conv2d_depthwise3 -DNO_BATCH_NORM=1)
     zipdepth_compile_shader(conv2d_spatial4 conv2d_spatial4 -DNO_BATCH_NORM=1)
-    zipdepth_compile_shader(conv2d_spatial4_tiled conv2d_spatial4_tiled -DNO_BATCH_NORM=1)
+    zipdepth_compile_shader(conv2d_spatial4_tiled conv2d_spatial4_tiled
+        -DNO_BATCH_NORM=1 -DLOCAL_X=16 -DLOCAL_Y=4)
     zipdepth_compile_shader(conv2d_spatial4_tiled_small conv2d_spatial4_tiled
         -DNO_BATCH_NORM=1 -DLOCAL_X=8 -DLOCAL_Y=4)
-    zipdepth_compile_shader(conv2d_spatial4_tiled_relu conv2d_spatial4_tiled -DRELU_INPUT=1)
+    zipdepth_compile_shader(conv2d_spatial4_tiled_relu conv2d_spatial4_tiled
+        -DRELU_INPUT=1 -DLOCAL_X=16 -DLOCAL_Y=4)
     foreach(SHADER batch_norm_activation activation add bilinear elementwise
             channel_average strip_attention adaptive_average nearest maxpool5
             concat4 context_reduce convex_upsample mobile_upsample

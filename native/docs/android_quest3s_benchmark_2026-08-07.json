@@ -14,7 +14,7 @@
   },
   "androidLibrary": {
     "filename": "libzipdepth_native.so",
-    "sha256": "3006c2349c8ebc3221d78fe1484665b0227694803f88efeb7dc706a6c8c4faa8"
+    "sha256": "2649c5b05dc1a581649b8f91b4415834fdb986004ccb0c2a693f2a5de5519ec1"
   },
   "modelArtifacts": [
     {
@@ -35,12 +35,12 @@
       "variant": "base_gpu",
       "width": 256,
       "height": 128,
-      "warmup": 3,
-      "iterations": 20,
-      "meanMs": 41.456,
-      "minimumMs": 39.231,
-      "maximumMs": 47.072,
-      "fps": 24.122
+      "warmup": 10,
+      "iterations": 400,
+      "meanMs": 40.358,
+      "minimumMs": 37.570,
+      "maximumMs": 48.095,
+      "fps": 24.778
     },
     {
       "variant": "base_mobile",
@@ -62,13 +62,13 @@
       "size": 140,
       "networkWidth": 256,
       "networkHeight": 128,
-      "warmup": 2,
-      "iterations": 10,
-      "meanMs": 50.246,
-      "minimumMs": 47.602,
-      "maximumMs": 54.287,
-      "fps": 19.902,
-      "maximumSubmitReturnMs": 0.021
+      "warmup": 3,
+      "iterations": 50,
+      "meanMs": 49.892,
+      "minimumMs": 48.135,
+      "maximumMs": 52.109,
+      "fps": 20.043,
+      "maximumSubmitReturnMs": 0.060
     },
     {
       "variant": "base_mobile",
@@ -88,7 +88,7 @@
   ],
   "lifecycle": {
     "correlatedFrames": 3,
-    "maximumSubmitReturnMs": 0.014,
+    "maximumSubmitReturnMs": 0.016,
     "deterministicRepeatedOutput": true,
     "finiteVariation": true,
     "cancellation": "passed",
@@ -104,7 +104,9 @@
   "questOptimizations": [
     "shared-weight pointwise convolution with 64-channel tiles",
     "tiled 3x3 convolution",
+    "Adreno-tuned 16x4 general 3x3 workgroups",
     "8x4 high-channel small-feature-map convolution",
+    "shader build helper preserves every compile-time tile define",
     "specialized depthwise 3x3 convolution"
   ],
   "limitations": [

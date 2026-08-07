@@ -27,14 +27,16 @@ The resulting library is
 On the Adreno 740 in a Quest 3S, persistent 256x128 tensor inference including
 HOST tensor upload and depth readback measured about 60 ms (16.5 FPS) for both
 official heads. Through the public InferBridge ABI, a 1920x1080 BGRA frame
-with `Size=140` measured 50.246 ms (19.902 FPS) for the Quest-optimized
+with `Size=140` measured 49.892 ms (20.043 FPS) for the Quest-optimized
 `base_gpu` path. The earlier untuned `base_mobile` path measured 69.947 ms
 (14.297 FPS). Those figures include CPU preprocessing,
 Vulkan inference, readback, and source-sized float output publication.
 
 The `base_gpu` Vulkan executor uses Adreno-friendly shared-weight 1x1
-convolution, tiled 3x3 convolution, a smaller high-channel feature-map tile,
-and the specialized depthwise path. Numerical parity against the official
+convolution, 16x4 tiled 3x3 workgroups, a smaller 8x4 high-channel
+feature-map tile, and the specialized depthwise path. The shader build helper
+passes every compile-time tile define so those Quest-specific workgroup sizes
+are present in the generated SPIR-V. Numerical parity against the official
 PyTorch graph passes with maximum absolute error below `9e-8`.
 
 The dynamic harness probe also passed correlated repeated output,
