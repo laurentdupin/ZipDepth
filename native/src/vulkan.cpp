@@ -20,7 +20,6 @@ void exchange_handle(Handle& left, Handle& right) {
     std::swap(left, right);
 }
 
-#if defined(_WIN32)
 bool has_extension(
     const std::vector<VkExtensionProperties>& extensions,
     const char* name) {
@@ -31,7 +30,6 @@ bool has_extension(
             return std::strcmp(extension.extensionName, name) == 0;
         });
 }
-#endif
 
 }  // namespace
 
@@ -281,6 +279,14 @@ VulkanContext::VulkanContext(
             physical_device_, nullptr, &extension_count, extensions.data()),
         "vkEnumerateDeviceExtensionProperties");
     std::vector<const char*> enabled_extensions;
+#if defined(__ANDROID__)
+    const bool has_global_queue_priority = has_extension(
+        extensions, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME);
+    if (has_global_queue_priority) {
+        enabled_extensions.push_back(
+            VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME);
+    }
+#endif
 #if defined(_WIN32)
     const bool has_external_memory_win32 = has_extension(
         extensions, VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
@@ -409,15 +415,26 @@ VulkanContext::VulkanContext(
 
 #if defined(__ANDROID__)
     // Inference is a background producer for an interactive stereo renderer.
-    // Give the platform scheduler room to service Godot's presentation queue
-    // instead of letting long compute batches monopolize the Quest GPU.
+    // The ordinary 0.0 queue priority is scoped to this VkDevice and therefore
+    // cannot yield to Godot's separate rendering device. Quest exposes Vulkan
+    // global queue priority, so explicitly classify inference as background
+    // work and let the XR presentation queue preempt long compute batches.
     constexpr float priority = 0.0f;
+    const VkDeviceQueueGlobalPriorityCreateInfoKHR global_priority_info{
+        VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR,
+        nullptr,
+        VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR,
+    };
 #else
     constexpr float priority = 1.0f;
 #endif
     const VkDeviceQueueCreateInfo queue_info{
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+#if defined(__ANDROID__)
+        has_global_queue_priority ? &global_priority_info : nullptr,
+#else
         nullptr,
+#endif
         0,
         queue_family_,
         1,
