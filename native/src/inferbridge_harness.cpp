@@ -30,6 +30,27 @@ struct ibrh_runtime {
 
 namespace { class ZipDepthGpuWorker; class ZipDepthHostWorker; }
 
+namespace {
+
+void normalize_affine_inverse_depth(std::vector<float>& depth) {
+    if (depth.empty()) return;
+    const auto bounds = std::minmax_element(depth.begin(), depth.end());
+    const float minimum = *bounds.first;
+    const float maximum = *bounds.second;
+    const float span = maximum - minimum;
+    if (!std::isfinite(minimum) || !std::isfinite(maximum) ||
+        span <= 1.0e-8f) {
+        std::fill(depth.begin(), depth.end(), 1.0f);
+        return;
+    }
+    const float inverse_span = 1.0f / span;
+    for (float& value : depth) {
+        value = std::clamp((value - minimum) * inverse_span, 0.0f, 1.0f);
+    }
+}
+
+} // namespace
+
 struct ibrh_model {
     ibrh_runtime* runtime = nullptr;
     zipdepth_context* context = nullptr;
@@ -294,6 +315,12 @@ private:
             temporary.data(), temporary.size());
         if (result != ZIPDEPTH_STATUS_OK)
             throw std::runtime_error(zipdepth_last_error());
+        // ZipDepth predicts affine-invariant inverse depth. Its absolute scale
+        // and shift have no geometric meaning, so publishing the raw tensor
+        // makes the presentation depend on arbitrary per-frame magnitudes.
+        // Match the official visualization convention and publish one
+        // canonical [0, 1] inverse-depth map instead.
+        normalize_affine_inverse_depth(temporary);
         for (uint32_t y = 0; y < network_height; ++y)
             std::copy_n(
                 temporary.data() + static_cast<uint64_t>(y) * network_width,
