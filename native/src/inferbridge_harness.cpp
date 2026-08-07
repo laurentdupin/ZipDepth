@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,7 +28,7 @@ struct ibrh_runtime {
     uint64_t adapter_luid = 0u;
 };
 
-namespace { class ZipDepthGpuWorker; }
+namespace { class ZipDepthGpuWorker; class ZipDepthHostWorker; }
 
 struct ibrh_model {
     ibrh_runtime* runtime = nullptr;
@@ -39,6 +40,9 @@ struct ibrh_model {
     std::shared_ptr<std::atomic<uint32_t>> gpu_admissions =
         std::make_shared<std::atomic<uint32_t>>(0u);
 #endif
+    std::shared_ptr<ZipDepthHostWorker> host_worker;
+    std::shared_ptr<std::atomic<uint32_t>> host_admissions =
+        std::make_shared<std::atomic<uint32_t>>(0u);
     uint32_t input_size = 384u;
     std::mutex submit_mutex;
 };
@@ -46,6 +50,7 @@ struct ibrh_model {
 struct ibrh_job {
     std::atomic<uint32_t> references{1u};
     std::atomic<uint32_t> state{IBRH_JOB_QUEUED};
+    std::atomic<bool> cancel_requested{false};
 #if defined(ZIPDEPTH_WITH_VULKAN)
     mutable std::mutex gpu_mutex;
     std::shared_ptr<zipdepth_native::ExternalJob> gpu_job;
@@ -194,6 +199,140 @@ void release_job(ibrh_job* job) {
     if (job != nullptr && job->references.fetch_sub(1u) == 1u) delete job;
 }
 
+class ZipDepthHostWorker final {
+public:
+    struct Work {
+        ibrh_job* job = nullptr;
+        zipdepth_context* context = nullptr;
+        const uint8_t* pixels = nullptr;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t row_stride = 0;
+        bool rgba = false;
+        uint32_t network_size = 0;
+        float* destination = nullptr;
+        uint32_t destination_stride = 0;
+    };
+
+    ZipDepthHostWorker() : thread_([this] { run(); }) {}
+    ~ZipDepthHostWorker() {
+        std::deque<Work> dropped;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+            dropped.swap(queue_);
+        }
+        for (Work& work : dropped) {
+            work.job->state.store(IBRH_JOB_CANCELLED);
+            release_job(work.job);
+        }
+        condition_.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    bool enqueue(Work work) {
+        retain_job(work.job);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) {
+                release_job(work.job);
+                return false;
+            }
+            queue_.push_back(work);
+        }
+        condition_.notify_one();
+        return true;
+    }
+
+private:
+    static uint32_t aligned_size(double value) {
+        return std::max(32u, static_cast<uint32_t>(
+            std::llround(value / 32.0) * 32.0));
+    }
+
+    void execute(const Work& work) {
+        const double scale = static_cast<double>(work.network_size) /
+            static_cast<double>(std::min(work.width, work.height));
+        const uint32_t network_width = aligned_size(work.width * scale);
+        const uint32_t network_height = aligned_size(work.height * scale);
+        const uint64_t plane = static_cast<uint64_t>(network_width) *
+            network_height;
+        std::vector<float> rgb(static_cast<size_t>(plane) * 3u);
+        for (uint32_t y = 0; y < network_height; ++y) {
+            const uint32_t source_y = std::min(
+                work.height - 1u,
+                static_cast<uint32_t>(
+                    static_cast<uint64_t>(y) * work.height / network_height));
+            for (uint32_t x = 0; x < network_width; ++x) {
+                const uint32_t source_x = std::min(
+                    work.width - 1u,
+                    static_cast<uint32_t>(
+                        static_cast<uint64_t>(x) * work.width / network_width));
+                const uint8_t* pixel = work.pixels +
+                    static_cast<uint64_t>(source_y) * work.row_stride +
+                    static_cast<uint64_t>(source_x) * 4u;
+                const uint64_t index =
+                    static_cast<uint64_t>(y) * network_width + x;
+                rgb[index] = pixel[work.rgba ? 0u : 2u] / 255.0f;
+                rgb[plane + index] = pixel[1] / 255.0f;
+                rgb[2u * plane + index] =
+                    pixel[work.rgba ? 2u : 0u] / 255.0f;
+            }
+        }
+        std::vector<float> temporary(static_cast<size_t>(plane));
+        const zipdepth_status result = zipdepth_infer_tensor_vulkan_f32(
+            work.context, rgb.data(), network_width, network_height,
+            temporary.data(), temporary.size());
+        if (result != ZIPDEPTH_STATUS_OK)
+            throw std::runtime_error(zipdepth_last_error());
+        for (uint32_t y = 0; y < work.height; ++y) {
+            const uint32_t source_y = y * network_height / work.height;
+            for (uint32_t x = 0; x < work.width; ++x) {
+                const uint32_t source_x = x * network_width / work.width;
+                work.destination[
+                    static_cast<uint64_t>(y) * work.destination_stride + x] =
+                    temporary[static_cast<uint64_t>(source_y) *
+                        network_width + source_x];
+            }
+        }
+    }
+
+    void run() {
+        for (;;) {
+            Work work;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
+                if (stopping_ && queue_.empty()) return;
+                work = queue_.front();
+                queue_.pop_front();
+            }
+            uint32_t queued = IBRH_JOB_QUEUED;
+            if (work.job->cancel_requested.load()) {
+                work.job->state.store(IBRH_JOB_CANCELLED);
+            } else if (work.job->state.compare_exchange_strong(
+                    queued, IBRH_JOB_RUNNING)) {
+                try {
+                    execute(work);
+                    uint32_t running = IBRH_JOB_RUNNING;
+                    work.job->state.compare_exchange_strong(running,
+                        work.job->cancel_requested.load() ?
+                            IBRH_JOB_CANCELLED : IBRH_JOB_COMPLETE);
+                } catch (...) {
+                    work.job->state.store(IBRH_JOB_FAILED);
+                }
+            }
+            release_job(work.job);
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<Work> queue_;
+    bool stopping_ = false;
+    std::thread thread_;
+};
+
 #if defined(ZIPDEPTH_WITH_VULKAN)
 class ZipDepthGpuWorker final {
 public:
@@ -285,14 +424,15 @@ ibrh_result IBRH_CALL query_capabilities(
     *capabilities = {};
     capabilities->struct_size = sizeof(*capabilities);
     capabilities->api_version = IBRH_CURRENT_API_VERSION;
-    capabilities->flags = IBRH_CAP_HOST_MEMORY;
+    capabilities->flags = IBRH_CAP_HOST_MEMORY |
+        IBRH_CAP_ASYNC_SUBMIT | IBRH_CAP_CANCELLATION;
     capabilities->input_domain_mask =
         1ull << IBRH_RESOURCE_DOMAIN_HOST;
     capabilities->output_domain_mask =
         1ull << IBRH_RESOURCE_DOMAIN_HOST;
     capabilities->maximum_inputs = 1u;
     capabilities->maximum_outputs = 1u;
-    capabilities->maximum_in_flight_jobs = 1u;
+    capabilities->maximum_in_flight_jobs = 3u;
 #if defined(ZIPDEPTH_WITH_VULKAN) && defined(_WIN32)
     try {
         if (zipdepth_native::probe_external_gpu(0u).available) {
@@ -310,8 +450,6 @@ ibrh_result IBRH_CALL query_capabilities(
         }
     } catch (...) {
     }
-#else
-    status->state = IBRH_JOB_COMPLETE;
 #endif
     capabilities->harness_id = {kHarnessId, sizeof(kHarnessId) - 1u};
     capabilities->harness_version = {
@@ -418,6 +556,7 @@ ibrh_result IBRH_CALL model_load(
             delete model;
             return fail(runtime, status_result(status), message);
         }
+        model->host_worker = std::make_shared<ZipDepthHostWorker>();
     }
     *output = model;
     return IBRH_OK;
@@ -425,6 +564,7 @@ ibrh_result IBRH_CALL model_load(
 
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
+    model->host_worker.reset();
 #if defined(ZIPDEPTH_WITH_VULKAN)
     model->gpu_worker.reset();
     model->external_gpu.reset();
@@ -505,6 +645,22 @@ ibrh_result IBRH_CALL submit(
         destination.height != input.height ||
         destination.pixel_format != IBRH_PIXEL_DEPTH_FLOAT32)
         return IBRH_ERROR_INVALID_ARGUMENT;
+    const uint64_t input_bytes =
+        static_cast<uint64_t>(input.row_stride_bytes) * input.height;
+    const uint64_t output_bytes =
+        static_cast<uint64_t>(destination.row_stride_bytes) *
+            destination.height;
+    if (input.native_handle == 0u || destination.native_handle == 0u ||
+        static_cast<uint64_t>(input.row_stride_bytes) <
+            static_cast<uint64_t>(input.width) * 4u ||
+        static_cast<uint64_t>(destination.row_stride_bytes) <
+            static_cast<uint64_t>(destination.width) * sizeof(float) ||
+        destination.row_stride_bytes % sizeof(float) != 0u ||
+        input.byte_offset > input.byte_size ||
+        input_bytes > input.byte_size - input.byte_offset ||
+        destination.byte_offset > destination.byte_size ||
+        output_bytes > destination.byte_size - destination.byte_offset)
+        return IBRH_ERROR_INVALID_ARGUMENT;
 #if defined(ZIPDEPTH_WITH_VULKAN) && defined(_WIN32)
     if (input.domain == IBRH_RESOURCE_DOMAIN_D3D12) {
         if (!model->external_gpu || destination.domain != IBRH_RESOURCE_DOMAIN_D3D12 ||
@@ -557,65 +713,34 @@ ibrh_result IBRH_CALL submit(
         source.synchronization.kind != IBRH_SYNC_NONE ||
         target.synchronization.kind != IBRH_SYNC_NONE)
         return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
-    const double scale = static_cast<double>(network_size) /
-        static_cast<double>(std::min(input.width, input.height));
-    const auto align32 = [](double value) {
-        return std::max(32u, static_cast<uint32_t>(
-            std::llround(value / 32.0) * 32.0));
-    };
-    const uint32_t network_width = align32(input.width * scale);
-    const uint32_t network_height = align32(input.height * scale);
-    std::vector<float> rgb(
-        static_cast<size_t>(network_width) * network_height * 3u);
     const auto* pixels = reinterpret_cast<const uint8_t*>(
         static_cast<uintptr_t>(input.native_handle)) + input.byte_offset;
-    for (uint32_t y = 0; y < network_height; ++y) {
-        const uint32_t sy = std::min(input.height - 1u,
-            static_cast<uint32_t>((static_cast<uint64_t>(y) * input.height) /
-                                  network_height));
-        for (uint32_t x = 0; x < network_width; ++x) {
-            const uint32_t sx = std::min(input.width - 1u,
-                static_cast<uint32_t>((static_cast<uint64_t>(x) * input.width) /
-                                      network_width));
-            const uint8_t* pixel = pixels + static_cast<uint64_t>(sy) *
-                input.row_stride_bytes + static_cast<uint64_t>(sx) * 4u;
-            const bool rgba = input.pixel_format == IBRH_PIXEL_RGBA8;
-            const uint64_t plane = static_cast<uint64_t>(network_width) *
-                network_height;
-            rgb[static_cast<uint64_t>(y) * network_width + x] =
-                pixel[rgba ? 0u : 2u] / 255.0f;
-            rgb[plane + static_cast<uint64_t>(y) * network_width + x] =
-                pixel[1] / 255.0f;
-            rgb[2u * plane + static_cast<uint64_t>(y) * network_width + x] =
-                pixel[rgba ? 2u : 0u] / 255.0f;
-        }
-    }
-    std::vector<float> temporary(
-        static_cast<size_t>(network_width) * network_height);
-    zipdepth_status status;
-    {
-        std::lock_guard<std::mutex> lock(model->submit_mutex);
-        status = zipdepth_infer_rgb_f32(
-            model->context, rgb.data(), network_width, network_height,
-            temporary.data(), temporary.size());
-    }
-    if (status != ZIPDEPTH_STATUS_OK)
-        return fail(model->runtime, status_result(status), zipdepth_last_error());
     auto* depth = reinterpret_cast<float*>(
         static_cast<uintptr_t>(destination.native_handle) + destination.byte_offset);
-    for (uint32_t y = 0; y < input.height; ++y)
-        for (uint32_t x = 0; x < input.width; ++x) {
-            const uint32_t sx = x * network_width / input.width;
-            const uint32_t sy = y * network_height / input.height;
-            depth[static_cast<uint64_t>(y) * input.width + x] =
-                temporary[static_cast<uint64_t>(sy) * network_width + sx];
-        }
     auto* job = new (std::nothrow) ibrh_job();
     if (!job) return IBRH_ERROR_INTERNAL;
+    uint32_t admitted = model->host_admissions->load();
+    while (admitted < 3u && !model->host_admissions->compare_exchange_weak(
+            admitted, admitted + 1u)) {}
+    if (admitted >= 3u) {
+        delete job;
+        return IBRH_ERROR_INVALID_STATE;
+    }
+    job->gpu_admission = model->host_admissions;
     job->source_frame_id = request->source_frame_id;
     job->timestamp_ns = request->timestamp_ns;
     job->width = input.width; job->height = input.height;
-    *output = job; return IBRH_OK;
+    if (!model->host_worker || !model->host_worker->enqueue({
+            job, model->context, pixels, input.width, input.height,
+            input.row_stride_bytes, input.pixel_format == IBRH_PIXEL_RGBA8,
+            network_size, depth,
+            static_cast<uint32_t>(
+                destination.row_stride_bytes / sizeof(float))})) {
+        delete job;
+        return IBRH_ERROR_INVALID_STATE;
+    }
+    *output = job;
+    return IBRH_OK;
 }
 
 ibrh_result IBRH_CALL job_poll(
@@ -627,7 +752,7 @@ ibrh_result IBRH_CALL job_poll(
     status->struct_size = sizeof(*status);
 #if defined(ZIPDEPTH_WITH_VULKAN)
     if (!job->gpu_backed) {
-        status->state = IBRH_JOB_COMPLETE;
+        status->state = job->state.load();
     } else if (job->state.load() == IBRH_JOB_FAILED ||
         job->state.load() == IBRH_JOB_CANCELLED) {
         status->state = job->state.load();
@@ -656,10 +781,12 @@ ibrh_result IBRH_CALL job_poll(
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (job == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
 #if defined(ZIPDEPTH_WITH_VULKAN)
-    job->state.store(IBRH_JOB_CANCELLED);
-    {
+    if (job->gpu_backed) {
+        job->state.store(IBRH_JOB_CANCELLED);
         std::lock_guard<std::mutex> lock(job->gpu_mutex);
         if (job->gpu_job) job->gpu_job->cancel();
+    } else {
+        job->cancel_requested.store(true);
     }
     return IBRH_OK;
 #endif

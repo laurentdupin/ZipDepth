@@ -70,3 +70,5 @@ latex/
 # Misc
 *.tmp
 *.bak
+.BuildAndroid/
+native/.BuildAndroid/

@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-07",
+  "device": "Meta Quest 3S",
+  "gpu": "Adreno (TM) 740",
+  "androidAbi": "arm64-v8a",
+  "androidApi": 29,
+  "buildType": "Release",
+  "harnessApi": "2.0",
+  "capabilityTier": "host_memory",
+  "benchmarkConditions": {
+    "deepDesktopPackageStopped": true,
+    "thermalStatus": 0
+  },
+  "androidLibrary": {
+    "filename": "libzipdepth_native.so",
+    "sha256": "988e95f9a15edbd91a9f1a099e8e067100097bb6cecb168a8dbdc9c3f1e83154"
+  },
+  "modelArtifacts": [
+    {
+      "variant": "base_gpu",
+      "filename": "zipdepth_base.zipd",
+      "bytes": 27257356,
+      "sha256": "5fc2ea97515bf9f01f61e899c82b72c86ecaae9788c68869cbc72e840302a5fd"
+    },
+    {
+      "variant": "base_mobile",
+      "filename": "zipdepth_base_mobile.zipd",
+      "bytes": 27251532,
+      "sha256": "776aef9da3c50d85a2ed20112ba2735231a555ccd916d9c2693c4c83efc8859a"
+    }
+  ],
+  "tensorBenchmarks": [
+    {
+      "variant": "base_gpu",
+      "width": 256,
+      "height": 128,
+      "warmup": 3,
+      "iterations": 20,
+      "meanMs": 59.910,
+      "minimumMs": 58.453,
+      "maximumMs": 60.868,
+      "fps": 16.692
+    },
+    {
+      "variant": "base_mobile",
+      "width": 256,
+      "height": 128,
+      "warmup": 3,
+      "iterations": 20,
+      "meanMs": 59.431,
+      "minimumMs": 57.873,
+      "maximumMs": 60.838,
+      "fps": 16.826
+    }
+  ],
+  "inferBridgeHostBenchmarks": [
+    {
+      "variant": "base_gpu",
+      "sourceWidth": 1920,
+      "sourceHeight": 1080,
+      "size": 140,
+      "networkWidth": 256,
+      "networkHeight": 128,
+      "warmup": 2,
+      "iterations": 10,
+      "meanMs": 74.628,
+      "minimumMs": 71.038,
+      "maximumMs": 83.378,
+      "fps": 13.400,
+      "maximumSubmitReturnMs": 0.099
+    },
+    {
+      "variant": "base_mobile",
+      "sourceWidth": 1920,
+      "sourceHeight": 1080,
+      "size": 140,
+      "networkWidth": 256,
+      "networkHeight": 128,
+      "warmup": 2,
+      "iterations": 10,
+      "meanMs": 69.947,
+      "minimumMs": 66.721,
+      "maximumMs": 75.895,
+      "fps": 14.297,
+      "maximumSubmitReturnMs": 0.018
+    }
+  ],
+  "lifecycle": {
+    "correlatedFrames": 3,
+    "maximumSubmitReturnMs": 0.014,
+    "deterministicRepeatedOutput": true,
+    "finiteVariation": true,
+    "cancellation": "passed",
+    "modelUnloadRuntimeDestroyDlopenClose": "passed"
+  },
+  "limitations": [
+    "Android input and output currently use HOST InferBridge bindings",
+    "AHardwareBuffer zero-copy capability is not advertised",
+    "tensor timing includes one upload and one readback per inference"
+  ]
+}

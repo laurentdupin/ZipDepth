@@ -101,3 +101,15 @@ if(MSVC)
     set_property(TARGET zipdepth_model_probe PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
+
+if(ZIPDEPTH_WITH_VULKAN)
+    add_executable(zipdepth_benchmark tools/benchmark.c)
+    target_link_libraries(zipdepth_benchmark PRIVATE zipdepth_native)
+    target_include_directories(zipdepth_benchmark PRIVATE include)
+endif()
+
+if(UNIX)
+    add_executable(zipdepth_harness_benchmark tools/harness_benchmark.cpp)
+    target_include_directories(zipdepth_harness_benchmark PRIVATE include)
+    target_link_libraries(zipdepth_harness_benchmark PRIVATE ${CMAKE_DL_LIBS})
+endif()
