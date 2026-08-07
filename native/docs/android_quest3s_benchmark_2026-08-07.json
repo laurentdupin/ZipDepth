@@ -14,7 +14,7 @@
   },
   "androidLibrary": {
     "filename": "libzipdepth_native.so",
-    "sha256": "988e95f9a15edbd91a9f1a099e8e067100097bb6cecb168a8dbdc9c3f1e83154"
+    "sha256": "3006c2349c8ebc3221d78fe1484665b0227694803f88efeb7dc706a6c8c4faa8"
   },
   "modelArtifacts": [
     {
@@ -37,10 +37,10 @@
       "height": 128,
       "warmup": 3,
       "iterations": 20,
-      "meanMs": 59.910,
-      "minimumMs": 58.453,
-      "maximumMs": 60.868,
-      "fps": 16.692
+      "meanMs": 41.456,
+      "minimumMs": 39.231,
+      "maximumMs": 47.072,
+      "fps": 24.122
     },
     {
       "variant": "base_mobile",
@@ -64,11 +64,11 @@
       "networkHeight": 128,
       "warmup": 2,
       "iterations": 10,
-      "meanMs": 74.628,
-      "minimumMs": 71.038,
-      "maximumMs": 83.378,
-      "fps": 13.400,
-      "maximumSubmitReturnMs": 0.099
+      "meanMs": 50.246,
+      "minimumMs": 47.602,
+      "maximumMs": 54.287,
+      "fps": 19.902,
+      "maximumSubmitReturnMs": 0.021
     },
     {
       "variant": "base_mobile",
@@ -94,6 +94,19 @@
     "cancellation": "passed",
     "modelUnloadRuntimeDestroyDlopenClose": "passed"
   },
+  "numericalParity": {
+    "reference": "official PyTorch base_gpu graph",
+    "inputSize": 32,
+    "cpuMaximumAbsoluteError": 7.4505806e-8,
+    "vulkanMaximumAbsoluteError": 8.94069672e-8,
+    "passed": true
+  },
+  "questOptimizations": [
+    "shared-weight pointwise convolution with 64-channel tiles",
+    "tiled 3x3 convolution",
+    "8x4 high-channel small-feature-map convolution",
+    "specialized depthwise 3x3 convolution"
+  ],
   "limitations": [
     "Android input and output currently use HOST InferBridge bindings",
     "AHardwareBuffer zero-copy capability is not advertised",

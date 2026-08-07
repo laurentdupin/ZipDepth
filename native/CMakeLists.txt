@@ -46,6 +46,8 @@ if(ZIPDEPTH_WITH_VULKAN)
     zipdepth_compile_shader(conv2d_depthwise3 conv2d_depthwise3 -DNO_BATCH_NORM=1)
     zipdepth_compile_shader(conv2d_spatial4 conv2d_spatial4 -DNO_BATCH_NORM=1)
     zipdepth_compile_shader(conv2d_spatial4_tiled conv2d_spatial4_tiled -DNO_BATCH_NORM=1)
+    zipdepth_compile_shader(conv2d_spatial4_tiled_small conv2d_spatial4_tiled
+        -DNO_BATCH_NORM=1 -DLOCAL_X=8 -DLOCAL_Y=4)
     zipdepth_compile_shader(conv2d_spatial4_tiled_relu conv2d_spatial4_tiled -DRELU_INPUT=1)
     foreach(SHADER batch_norm_activation activation add bilinear elementwise
             channel_average strip_attention adaptive_average nearest maxpool5

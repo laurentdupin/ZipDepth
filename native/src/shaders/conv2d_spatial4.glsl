@@ -23,7 +23,8 @@ layout(push_constant) uniform Parameters {
     uint input_width; uint input_height; uint input_channels;
     uint output_width; uint output_height; uint output_channels;
     uint kernel_height; uint kernel_width; uint stride;
-    int padding_top; int padding_left; uint groups; uint has_bias;
+    int padding_top; int padding_left; uint dilation; uint groups;
+    uint has_bias;
     uint has_batch_norm; uint activation; float epsilon;
 } parameters;
 

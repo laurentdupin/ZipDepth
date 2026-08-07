@@ -11,6 +11,7 @@
 #include "conv2d_depthwise3_spv.h"
 #include "conv2d_spatial4_spv.h"
 #include "conv2d_spatial4_tiled_spv.h"
+#include "conv2d_spatial4_tiled_small_spv.h"
 #include "conv2d_spatial4_tiled_relu_spv.h"
 
 #include <stdexcept>
@@ -36,37 +37,42 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           midas_conv2d_pointwise4_spv,
           midas_conv2d_pointwise4_spv_size,
           4,
-          64)),
+          68)),
       conv_pointwise_gemm_(context.create_pipeline(
           midas_conv2d_pointwise_gemm_spv,
           midas_conv2d_pointwise_gemm_spv_size,
           4,
-          64)),
+          68)),
       conv_pointwise_gemm_residual_(context.create_pipeline(
           midas_conv2d_pointwise_gemm_residual_spv,
           midas_conv2d_pointwise_gemm_residual_spv_size,
           5,
-          64)),
+          68)),
       conv_depthwise3_(context.create_pipeline(
           midas_conv2d_depthwise3_spv,
           midas_conv2d_depthwise3_spv_size,
           4,
-          64)),
+          68)),
       conv_spatial4_(context.create_pipeline(
           midas_conv2d_spatial4_spv,
           midas_conv2d_spatial4_spv_size,
           4,
-          64)),
+          68)),
       conv_spatial4_tiled_(context.create_pipeline(
           midas_conv2d_spatial4_tiled_spv,
           midas_conv2d_spatial4_tiled_spv_size,
           4,
-          64)),
+          68)),
+      conv_spatial4_tiled_small_(context.create_pipeline(
+          midas_conv2d_spatial4_tiled_small_spv,
+          midas_conv2d_spatial4_tiled_small_spv_size,
+          4,
+          68)),
       conv_spatial4_tiled_relu_(context.create_pipeline(
           midas_conv2d_spatial4_tiled_relu_spv,
           midas_conv2d_spatial4_tiled_relu_spv_size,
           4,
-          64)),
+          68)),
       batch_norm_activation_(context.create_pipeline(
           midas_batch_norm_activation_spv,
           midas_batch_norm_activation_spv_size,
@@ -96,6 +102,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv_spatial4_.set_debug_name("midas_conv2d_spatial4");
     conv_spatial4_tiled_.set_debug_name(
         "midas_conv2d_spatial4_tiled");
+    conv_spatial4_tiled_small_.set_debug_name(
+        "midas_conv2d_spatial4_tiled_small");
     conv_spatial4_tiled_relu_.set_debug_name(
         "midas_conv2d_spatial4_tiled_relu");
     batch_norm_activation_.set_debug_name(
@@ -155,13 +163,26 @@ void VulkanOperators::conv(
         kernel_height, kernel_width, stride,
         padding_top, padding_left, dilation, groups, has_bias ? 1u : 0u,
         gamma != nullptr ? 1u : 0u, activation, 0.001f};
-    /* The ZipDepth fork extends the generic convolution push constants with
-     * dilation. Keep the initial correctness executor on that one ABI; tuned
-     * kernels can be migrated after each specialized shader accepts it. */
-    const bool pointwise = false;
-    const bool depthwise = false;
-    const bool spatial4 = false;
-    const bool spatial4_tiled = false;
+    const bool pointwise =
+        groups == 1 && kernel_height == 1 && kernel_width == 1 &&
+        stride == 1 && dilation == 1 && padding_top == 0 &&
+        padding_left == 0 && input_width == output_width &&
+        input_height == output_height;
+    const bool depthwise =
+        groups == input_channels && groups == output_channels &&
+        kernel_height == 3 && kernel_width == 3 && stride <= 2 &&
+        dilation == 1 && padding_top == 1 && padding_left == 1;
+    const bool spatial4 =
+        groups == 1 && kernel_height == 3 && kernel_width == 3 &&
+        dilation == 1;
+    const bool spatial4_tiled =
+        spatial4 && stride == 1 && padding_top == 1 &&
+        padding_left == 1 && input_width == output_width &&
+        input_height == output_height;
+    const bool spatial4_tiled_small =
+        spatial4_tiled && !relu_input &&
+        output_width <= 8 && output_height <= 4;
+    const bool pointwise_residual = pointwise && residual != nullptr;
     if (relu_input && !spatial4_tiled) {
         throw std::invalid_argument(
             "fused input ReLU requires tiled spatial convolution");
@@ -177,15 +198,17 @@ void VulkanOperators::conv(
     }
     const VulkanPipeline& pipeline =
         pointwise
-            ? (residual != nullptr
+            ? (pointwise_residual
                 ? conv_pointwise_gemm_residual_
-                : conv_pointwise_gemm_)
+                : conv_pointwise4_)
             :
         (depthwise ? conv_depthwise3_ :
         (spatial4_tiled
-            ? (relu_input
+            ? (spatial4_tiled_small
+                ? conv_spatial4_tiled_small_
+                : (relu_input
                 ? conv_spatial4_tiled_relu_
-                : conv_spatial4_tiled_)
+                : conv_spatial4_tiled_))
             :
         (spatial4 ? conv_spatial4_ : conv_)));
     std::vector<const VulkanBuffer*> resources{
@@ -198,14 +221,17 @@ void VulkanOperators::conv(
         resources,
         &parameters,
         sizeof(parameters),
-        pointwise
+        pointwise_residual
             ? divide_up(output_width * output_height, 64)
-            : divide_up(output_width, spatial4_tiled ? 16 : 8),
-        pointwise
+            : divide_up(output_width,
+                spatial4_tiled && !spatial4_tiled_small ? 16 : 8),
+        pointwise_residual
             ? divide_up(output_channels, 64)
-            : divide_up(output_height, 8),
-        pointwise
+            : divide_up(output_height, spatial4_tiled_small ? 4 : 8),
+        pointwise_residual
             ? 1
+            : pointwise
+            ? divide_up(output_channels, 4)
             : (spatial4
                 ? divide_up(output_channels, spatial4_tiled ? 8 : 4)
                 : output_channels));

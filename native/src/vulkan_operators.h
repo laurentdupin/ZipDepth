@@ -75,6 +75,7 @@ private:
     VulkanPipeline conv_depthwise3_;
     VulkanPipeline conv_spatial4_;
     VulkanPipeline conv_spatial4_tiled_;
+    VulkanPipeline conv_spatial4_tiled_small_;
     VulkanPipeline conv_spatial4_tiled_relu_;
     VulkanPipeline batch_norm_activation_;
     VulkanPipeline activation_;
