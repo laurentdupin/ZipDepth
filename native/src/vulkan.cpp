@@ -417,13 +417,15 @@ VulkanContext::VulkanContext(
     // Inference is a background producer for an interactive stereo renderer.
     // The ordinary 0.0 queue priority is scoped to this VkDevice and therefore
     // cannot yield to Godot's separate rendering device. Quest exposes Vulkan
-    // global queue priority, so explicitly classify inference as background
-    // work and let the XR presentation queue preempt long compute batches.
+    // global queue priority. Classify inference explicitly as normal work so
+    // an interactive XR render queue can request HIGH priority without
+    // starving depth updates altogether (LOW is starved by a saturated XR
+    // renderer on Quest).
     constexpr float priority = 0.0f;
     const VkDeviceQueueGlobalPriorityCreateInfoKHR global_priority_info{
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR,
         nullptr,
-        VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR,
+        VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR,
     };
 #else
     constexpr float priority = 1.0f;
