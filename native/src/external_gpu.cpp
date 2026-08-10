@@ -220,6 +220,13 @@ public:
                         std::move(normalized),
                         static_cast<std::uint32_t>(shape.width),
                         static_cast<std::uint32_t>(shape.height));
+                    // ZipDepth is affine-invariant inverse depth. Keep the GPU
+                    // publication identical to the host ABI path: normalize
+                    // the complete neural output before resizing it into the
+                    // caller-owned source-resolution texture.
+                    io_.normalize_relative(
+                        depth.buffer,
+                        static_cast<std::uint32_t>(shape.width * shape.height));
                     io_.resize_depth(
                         output, depth.buffer,
                         static_cast<std::uint32_t>(shape.width),

@@ -55,7 +55,8 @@ if(ZIPDEPTH_WITH_VULKAN)
     foreach(SHADER batch_norm_activation activation add bilinear elementwise
             channel_average strip_attention adaptive_average nearest maxpool5
             concat4 context_reduce convex_upsample mobile_upsample
-            preprocess_texture resize_depth_image)
+            preprocess_texture resize_depth_image reduce_minmax
+            normalize_relative)
         zipdepth_compile_shader(${SHADER})
     endforeach()
 endif()
