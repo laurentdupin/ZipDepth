@@ -46,9 +46,9 @@ int fail(const char* message, ibrh_result result = IBRH_ERROR_INTERNAL) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 8) {
+    if (argc != 8 && argc != 9) {
         std::fprintf(stderr,
-            "usage: %s HARNESS_SO MODEL SIZE WIDTH HEIGHT WARMUP ITERATIONS\n",
+            "usage: %s HARNESS_SO MODEL SIZE WIDTH HEIGHT WARMUP ITERATIONS [OUTPUT_F32]\n",
             argv[0]);
         return 2;
     }
@@ -210,6 +210,14 @@ int main(int argc, char** argv) {
         if (!std::isfinite(value)) return fail("non-finite depth output");
         output_min = std::min(output_min, value);
         output_max = std::max(output_max, value);
+    }
+    if (argc == 9) {
+        std::FILE* output_file = std::fopen(argv[8], "wb");
+        if (!output_file) return fail("could not open output dump");
+        const std::size_t written = std::fwrite(
+            depth.data(), sizeof(float), depth.size(), output_file);
+        if (std::fclose(output_file) != 0 || written != depth.size())
+            return fail("could not write output dump");
     }
     const double mean_ms = total_ms / iterations;
     std::printf(

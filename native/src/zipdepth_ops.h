@@ -52,11 +52,20 @@ public:
         const midas_native::VulkanBuffer& depth,
         const midas_native::VulkanBuffer& alpha,
         std::uint32_t width, std::uint32_t height);
+    void spatial_int8(midas_native::VulkanBuffer& out,
+        const midas_native::VulkanBuffer& input,
+        const midas_native::VulkanBuffer& packed_weight,
+        const midas_native::VulkanBuffer& weight_scale,
+        const midas_native::VulkanBuffer& bias,
+        std::uint32_t width, std::uint32_t height,
+        std::uint32_t input_channels, std::uint32_t output_channels,
+        bool has_bias);
 
 private:
     midas_native::VulkanContext& context_;
     midas_native::VulkanPipeline elementwise_, channel_average_, strip_,
-        adaptive_, nearest_, maxpool_, concat_, context_reduce_, convex_, mobile_;
+        adaptive_, nearest_, maxpool_, concat_, context_reduce_, convex_, mobile_,
+        reduce_absmax_, quantize_int8_, spatial_int8_;
 };
 
 }  // namespace zipdepth_native

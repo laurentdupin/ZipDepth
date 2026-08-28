@@ -52,6 +52,16 @@ if(ZIPDEPTH_WITH_VULKAN)
         -DNO_BATCH_NORM=1 -DLOCAL_X=8 -DLOCAL_Y=4)
     zipdepth_compile_shader(conv2d_spatial4_tiled_relu conv2d_spatial4_tiled
         -DRELU_INPUT=1 -DLOCAL_X=16 -DLOCAL_Y=4)
+    zipdepth_compile_shader(precision_pointwise_fp32)
+    zipdepth_compile_shader(precision_pointwise_fp16)
+    zipdepth_compile_shader(precision_pointwise_fp16_weights)
+    zipdepth_compile_shader(precision_pointwise_int8)
+    zipdepth_compile_shader(quantize_rows_int8)
+    zipdepth_compile_shader(precision_spatial_fp16)
+    zipdepth_compile_shader(precision_spatial_int8)
+    zipdepth_compile_shader(reduce_absmax)
+    zipdepth_compile_shader(quantize_nchw_int8)
+    zipdepth_compile_shader(conv2d_spatial_int8)
     foreach(SHADER batch_norm_activation activation add bilinear elementwise
             channel_average strip_attention adaptive_average nearest maxpool5
             concat4 context_reduce convex_upsample mobile_upsample
@@ -118,4 +128,25 @@ if(UNIX)
     add_executable(zipdepth_harness_benchmark tools/harness_benchmark.cpp)
     target_include_directories(zipdepth_harness_benchmark PRIVATE include)
     target_link_libraries(zipdepth_harness_benchmark PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+if(ZIPDEPTH_WITH_VULKAN)
+    add_executable(zipdepth_precision_probe
+        tools/precision_probe.cpp src/vulkan.cpp ${ZIPDEPTH_SHADER_HEADERS})
+    target_include_directories(zipdepth_precision_probe PRIVATE
+        include src "${ZIPDEPTH_GENERATED_DIR}")
+    target_link_libraries(zipdepth_precision_probe PRIVATE
+        Vulkan::Vulkan)
+    add_executable(zipdepth_spatial_precision_probe
+        tools/spatial_precision_probe.cpp src/vulkan.cpp
+        src/vulkan_operators.cpp ${ZIPDEPTH_SHADER_HEADERS})
+    target_include_directories(zipdepth_spatial_precision_probe PRIVATE
+        include src "${ZIPDEPTH_GENERATED_DIR}")
+    target_link_libraries(zipdepth_spatial_precision_probe PRIVATE
+        Vulkan::Vulkan)
+    if(WIN32)
+        target_link_libraries(zipdepth_precision_probe PRIVATE d3d12 dxgi)
+        target_link_libraries(zipdepth_spatial_precision_probe PRIVATE
+            d3d12 dxgi)
+    endif()
 endif()

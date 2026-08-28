@@ -1,8 +1,11 @@
 #include "vulkan_executor.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace zipdepth_native {
 namespace {
@@ -14,16 +17,46 @@ VulkanExecutor::VulkanExecutor(const std::string& path,std::uint32_t index)
     :model_(path),context_(index),operators_(context_),extra_(context_),
      zero_(context_.create_device_buffer(sizeof(float))){
     const float z=0;context_.upload(zero_,&z,sizeof(z));
+    const char* int8=std::getenv("ZIPDEPTH_INT8");
+    const std::string int8_mode=int8?int8:"";
+    int8_enabled_=(int8_mode=="1"||int8_mode=="encoder")&&context_.supports_packed_int8_dot();
+    int8_encoder_only_=int8_mode=="encoder";
     weights_.reserve(model_.tensor_names().size());
+    int8_weights_.reserve(model_.tensor_names().size());
     for(const std::string&name:model_.tensor_names()){
         const auto&t=model_.tensor(name);auto b=context_.create_device_buffer(t.elements*sizeof(float));
         context_.upload(b,t.data,static_cast<std::size_t>(t.elements*sizeof(float)));
         weights_.emplace(name,std::move(b));
+        if(int8_enabled_&&t.rank==4&&t.dimensions[2]==3&&t.dimensions[3]==3&&t.dimensions[1]%4==0){
+            const auto oc=static_cast<std::uint32_t>(t.dimensions[0]);
+            const auto ic=static_cast<std::uint32_t>(t.dimensions[1]);
+            std::vector<float> scales(oc);
+            std::vector<std::uint32_t> packed(std::uint64_t(oc)*9*(ic/4));
+            for(std::uint32_t o=0;o<oc;++o){
+                float maximum=0.0f;
+                for(std::uint32_t c=0;c<ic;++c)for(std::uint32_t y=0;y<3;++y)for(std::uint32_t x=0;x<3;++x)
+                    maximum=std::max(maximum,std::abs(t.data[((std::uint64_t(o)*ic+c)*3+y)*3+x]));
+                scales[o]=std::max(maximum/127.0f,1.0e-8f);
+                for(std::uint32_t y=0;y<3;++y)for(std::uint32_t x=0;x<3;++x)for(std::uint32_t g=0;g<ic/4;++g){
+                    std::uint32_t value=0;
+                    for(std::uint32_t lane=0;lane<4;++lane){
+                        const float source=t.data[((std::uint64_t(o)*ic+g*4+lane)*3+y)*3+x];
+                        const int quantized=static_cast<int>(std::round(std::max(-127.0f,std::min(127.0f,source/scales[o]))));
+                        value|=(static_cast<std::uint32_t>(quantized)&0xffu)<<(lane*8);
+                    }
+                    packed[((std::uint64_t(o)*3+y)*3+x)*(ic/4)+g]=value;
+                }
+            }
+            QuantizedWeight quantized{context_.create_device_buffer(packed.size()*sizeof(std::uint32_t)),context_.create_device_buffer(scales.size()*sizeof(float))};
+            context_.upload(quantized.packed,packed.data(),packed.size()*sizeof(std::uint32_t));
+            context_.upload(quantized.scales,scales.data(),scales.size()*sizeof(float));
+            int8_weights_.emplace(name,std::move(quantized));
+        }
     }
 }
 const midas_native::VulkanBuffer& VulkanExecutor::weight(const std::string&n)const{auto i=weights_.find(n);if(i==weights_.end())throw std::runtime_error("missing GPU tensor: "+n);return i->second;}
 VulkanExecutor::Tensor VulkanExecutor::make(std::uint32_t c,std::uint32_t h,std::uint32_t w){return {c,h,w,context_.create_device_buffer(elements(c,h,w)*sizeof(float))};}
-VulkanExecutor::Tensor VulkanExecutor::conv(const Tensor&i,const std::string&n,const char*bias,std::uint32_t stride,std::uint32_t padding,std::uint32_t dilation,std::uint32_t groups){const auto&s=model_.tensor(n);if(s.rank!=4||s.dimensions[1]!=i.channels/groups)throw std::runtime_error("GPU convolution shape mismatch: "+n);auto oc=static_cast<std::uint32_t>(s.dimensions[0]),kh=static_cast<std::uint32_t>(s.dimensions[2]),kw=static_cast<std::uint32_t>(s.dimensions[3]);auto oh=(i.height+2*padding-dilation*(kh-1)-1)/stride+1,ow=(i.width+2*padding-dilation*(kw-1)-1)/stride+1;Tensor o=make(oc,oh,ow);operators_.conv(o.buffer,i.buffer,weight(n),bias?weight(bias):zero_,i.width,i.height,i.channels,ow,oh,oc,kh,kw,stride,padding,padding,dilation,groups,bias!=nullptr);return o;}
+VulkanExecutor::Tensor VulkanExecutor::conv(const Tensor&i,const std::string&n,const char*bias,std::uint32_t stride,std::uint32_t padding,std::uint32_t dilation,std::uint32_t groups){const auto&s=model_.tensor(n);if(s.rank!=4||s.dimensions[1]!=i.channels/groups)throw std::runtime_error("GPU convolution shape mismatch: "+n);auto oc=static_cast<std::uint32_t>(s.dimensions[0]),kh=static_cast<std::uint32_t>(s.dimensions[2]),kw=static_cast<std::uint32_t>(s.dimensions[3]);auto oh=(i.height+2*padding-dilation*(kh-1)-1)/stride+1,ow=(i.width+2*padding-dilation*(kw-1)-1)/stride+1;Tensor o=make(oc,oh,ow);auto quantized=int8_weights_.find(n);const bool in_scope=!int8_encoder_only_||n.rfind("encoder.",0)==0;if(int8_enabled_&&in_scope&&groups==1&&stride==1&&padding==1&&dilation==1&&kh==3&&kw==3&&i.channels%4==0&&quantized!=int8_weights_.end())extra_.spatial_int8(o.buffer,i.buffer,quantized->second.packed,quantized->second.scales,bias?weight(bias):zero_,i.width,i.height,i.channels,oc,bias!=nullptr);else operators_.conv(o.buffer,i.buffer,weight(n),bias?weight(bias):zero_,i.width,i.height,i.channels,ow,oh,oc,kh,kw,stride,padding,padding,dilation,groups,bias!=nullptr);return o;}
 VulkanExecutor::Tensor VulkanExecutor::bn(const Tensor&i,const std::string&p,bool relu){Tensor o=make(i.channels,i.height,i.width);operators_.batch_norm_activation(o.buffer,i.buffer,weight(p+".weight"),weight(p+".bias"),weight(p+".running_mean"),weight(p+".running_var"),checked(elements(i.channels,i.height,i.width)),i.width*i.height,relu?1u:0u);return o;}
 VulkanExecutor::Tensor VulkanExecutor::conv_bn(const Tensor&i,const std::string&p,std::uint32_t stride,bool relu){const auto&s=model_.tensor(p+".conv.weight");return bn(conv(i,p+".conv.weight",nullptr,stride,static_cast<std::uint32_t>(s.dimensions[2]/2)),p+".bn",relu);}
 VulkanExecutor::Tensor VulkanExecutor::add(const Tensor&a,const Tensor&b,float scale){if(a.channels!=b.channels||a.height!=b.height||a.width!=b.width)throw std::runtime_error("GPU add shape mismatch");Tensor o=make(a.channels,a.height,a.width);if(scale==1.0f)operators_.add(o.buffer,a.buffer,b.buffer,checked(elements(a.channels,a.height,a.width)));else extra_.elementwise(o.buffer,a.buffer,b.buffer,checked(elements(a.channels,a.height,a.width)),a.width*a.height,1,scale);return o;}

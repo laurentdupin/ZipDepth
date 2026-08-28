@@ -25,6 +25,10 @@ public:
                         std::uint32_t width, std::uint32_t height);
 
 private:
+    struct QuantizedWeight {
+        midas_native::VulkanBuffer packed;
+        midas_native::VulkanBuffer scales;
+    };
     const midas_native::VulkanBuffer& weight(const std::string& name) const;
     Tensor make(std::uint32_t c,std::uint32_t h,std::uint32_t w);
     Tensor conv(const Tensor& in,const std::string& weight,const char* bias,
@@ -48,6 +52,9 @@ private:
     ZipDepthOps extra_;
     midas_native::VulkanBuffer zero_;
     std::unordered_map<std::string,midas_native::VulkanBuffer> weights_;
+    std::unordered_map<std::string,QuantizedWeight> int8_weights_;
+    bool int8_enabled_ = false;
+    bool int8_encoder_only_ = false;
 };
 
 }  // namespace zipdepth_native
