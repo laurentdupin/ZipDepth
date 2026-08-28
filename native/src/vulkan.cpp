@@ -1209,6 +1209,7 @@ void VulkanContext::begin_batch() {
     }
     batch_command_ = begin_commands();
     batch_has_dispatch_ = false;
+    batch_dispatch_count_ = 0;
     batch_buffer_access_.clear();
     batch_image_access_.clear();
     batch_image_layout_.clear();
@@ -1246,6 +1247,7 @@ VulkanSubmission VulkanContext::end_batch_async(
     VkCommandBuffer command = batch_command_;
     batch_command_ = VK_NULL_HANDLE;
     batch_has_dispatch_ = false;
+    batch_dispatch_count_ = 0;
     try {
         VulkanSubmission result = submit_commands(
             command, &resources->wait, &resources->signal);
@@ -1271,9 +1273,14 @@ void VulkanContext::end_batch() {
     if (batch_command_ == VK_NULL_HANDLE) {
         throw std::logic_error("no active Vulkan batch");
     }
+    if (!batch_has_dispatch_) {
+        cancel_batch();
+        return;
+    }
     VkCommandBuffer command = batch_command_;
     batch_command_ = VK_NULL_HANDLE;
     batch_has_dispatch_ = false;
+    batch_dispatch_count_ = 0;
     end_commands(command);
     release_batch_resources();
 }
@@ -1285,6 +1292,7 @@ void VulkanContext::cancel_batch() noexcept {
         batch_command_ = VK_NULL_HANDLE;
     }
     batch_has_dispatch_ = false;
+    batch_dispatch_count_ = 0;
     release_batch_resources();
 }
 
@@ -2000,8 +2008,21 @@ void VulkanContext::dispatch_resources(
     }
     if (batched) {
         batch_has_dispatch_ = true;
+        ++batch_dispatch_count_;
         batch_descriptor_sets_.push_back(
             {const_cast<VulkanPipeline*>(&pipeline), descriptor_set});
+#if defined(__ANDROID__)
+        // Keep inference command buffers short enough for the interactive
+        // OpenXR queue to run between them. A whole-network batch can occupy
+        // Adreno for more than one display period, while one submission per
+        // operator loses most inference throughput to synchronization.
+        constexpr std::uint32_t kAndroidBatchDispatchLimit = 2;
+        if (batch_segmenting_enabled_ &&
+            batch_dispatch_count_ >= kAndroidBatchDispatchLimit) {
+            end_batch();
+            begin_batch();
+        }
+#endif
     } else {
         end_commands(command, wait);
         if (profile) {

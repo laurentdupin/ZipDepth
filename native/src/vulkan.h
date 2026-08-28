@@ -283,10 +283,13 @@ public:
             return;
         }
         begin_batch();
+        batch_segmenting_enabled_ = true;
         try {
             std::forward<Function>(function)();
+            batch_segmenting_enabled_ = false;
             end_batch();
         } catch (...) {
+            batch_segmenting_enabled_ = false;
             cancel_batch();
             throw;
         }
@@ -390,6 +393,8 @@ private:
     std::unordered_map<std::string, ProfileStat> profile_stats_;
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
     bool batch_has_dispatch_ = false;
+    bool batch_segmenting_enabled_ = false;
+    std::uint32_t batch_dispatch_count_ = 0;
     bool track_resource_hazards_ = true;
     std::vector<VulkanBatchedDescriptor> batch_descriptor_sets_;
     std::vector<VulkanDeferredBuffer> batch_deferred_buffers_;
