@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(zipdepth_native VERSION 0.1.0 LANGUAGES C CXX)
+include("${CMAKE_CURRENT_LIST_DIR}/../../native_support/InferBridgeNativeHarnessSupport.cmake")
+link_libraries(InferBridge::NativeHarnessSupport)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -57,11 +59,14 @@ if(ZIPDEPTH_WITH_VULKAN)
     zipdepth_compile_shader(precision_pointwise_fp16_weights)
     zipdepth_compile_shader(precision_pointwise_int8)
     zipdepth_compile_shader(quantize_rows_int8)
-    zipdepth_compile_shader(precision_spatial_fp16)
     zipdepth_compile_shader(precision_spatial_int8)
-    zipdepth_compile_shader(reduce_absmax)
-    zipdepth_compile_shader(quantize_nchw_int8)
-    zipdepth_compile_shader(conv2d_spatial_int8)
+    foreach(SHARED_SHADER reduce_absmax quantize_nchw_int8 conv2d_spatial_int8)
+        inferbridge_compile_native_support_shader(
+            NAME "${SHARED_SHADER}" PREFIX midas
+            GENERATED_DIR "${ZIPDEPTH_GENERATED_DIR}"
+            EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            OUT_VAR ZIPDEPTH_SHADER_HEADERS)
+    endforeach()
     foreach(SHADER batch_norm_activation activation add bilinear elementwise
             channel_average strip_attention adaptive_average nearest maxpool5
             concat4 context_reduce convex_upsample mobile_upsample

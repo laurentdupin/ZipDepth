@@ -52,7 +52,9 @@ private:
     ZipDepthOps extra_;
     midas_native::VulkanBuffer zero_;
     std::unordered_map<std::string,midas_native::VulkanBuffer> weights_;
+    std::unordered_map<std::string,midas_native::VulkanBuffer> fp16_weights_;
     std::unordered_map<std::string,QuantizedWeight> int8_weights_;
+    bool fp16_enabled_ = false;
     bool int8_enabled_ = false;
     bool int8_encoder_only_ = false;
 };

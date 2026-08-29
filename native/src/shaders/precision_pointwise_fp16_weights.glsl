@@ -7,15 +7,19 @@ layout(set = 0, binding = 0, std430) writeonly buffer Output {
     float data[];
 } output_buffer;
 layout(set = 0, binding = 1, std430) readonly buffer Input {
-    vec4 data[];
+    float data[];
 } input_buffer;
 layout(set = 0, binding = 2, std430) readonly buffer Weight {
-    f16vec4 data[];
+    float16_t data[];
 } weight_buffer;
+layout(set = 0, binding = 3, std430) readonly buffer Bias {
+    float data[];
+} bias_buffer;
 layout(push_constant) uniform Parameters {
     uint spatial;
     uint input_channels;
     uint output_channels;
+    uint has_bias;
 } parameters;
 
 void main() {
@@ -25,11 +29,14 @@ void main() {
     const uint position = index / parameters.output_channels;
     const uint output_channel = index % parameters.output_channels;
     float sum = 0.0;
-    const uint packed_channels = parameters.input_channels / 4;
-    for (uint group = 0; group < packed_channels; ++group) {
-        sum += dot(input_buffer.data[
-            position * packed_channels + group], vec4(weight_buffer.data[
-                output_channel * packed_channels + group]));
+    for (uint input_channel = 0;
+         input_channel < parameters.input_channels; ++input_channel) {
+        sum += input_buffer.data[
+            input_channel * parameters.spatial + position] *
+            float(weight_buffer.data[
+                output_channel * parameters.input_channels + input_channel]);
     }
-    output_buffer.data[index] = sum;
+    output_buffer.data[
+        output_channel * parameters.spatial + position] = sum +
+        (parameters.has_bias != 0 ? bias_buffer.data[output_channel] : 0.0);
 }

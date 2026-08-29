@@ -1,5 +1,7 @@
 
 #include "external_gpu.h"
+#include "inferbridge/native_harness_resource_cache.h"
+#include "inferbridge/native_harness_resource_lifetime.h"
 
 #include "gpu_io.h"
 #include "vulkan_executor.h"
@@ -104,13 +106,14 @@ void validate_texture(
 
 class ExternalJobImpl final : public ExternalJob {
 public:
-    ExternalJobImpl(std::shared_ptr<ExternalGpu> owner, VulkanImage input,
-                    VulkanImage output, VulkanSubmission submission)
-        : owner_(std::move(owner)), input_(std::move(input)),
-          output_(std::move(output)), submission_(std::move(submission)) {}
+    ExternalJobImpl(std::shared_ptr<ExternalGpu> owner,
+                    VulkanSubmission submission,
+                    inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime)
+        : owner_(std::move(owner)), submission_(std::move(submission)),
+          lifetime_(std::move(lifetime)) {}
     ~ExternalJobImpl() override {
-        try { submission_.wait(); } catch (...) {}
-        submission_ = {}; output_ = {}; input_ = {};
+        inferbridge::native_harness::wait_then_retire(
+            lifetime_, submission_, [] {});
     }
     ExternalJobState state() const override {
         if (cancelled_.load()) return ExternalJobState::cancelled;
@@ -120,9 +123,8 @@ public:
     void cancel() override { cancelled_.store(true); }
 private:
     std::shared_ptr<ExternalGpu> owner_;
-    VulkanImage input_;
-    VulkanImage output_;
     VulkanSubmission submission_;
+    inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime_;
     std::atomic<bool> cancelled_{false};
 };
 #endif
@@ -170,31 +172,46 @@ public:
             request.output_height != request.height) {
             throw std::invalid_argument("invalid ZipDepth GPU texture request");
         }
-        validate_texture(d3d12_.Get(), request.shared_texture_handle,
-            request.width, request.height,
-            request.rgba ? DXGI_FORMAT_R8G8B8A8_UNORM :
-                           DXGI_FORMAT_B8G8R8A8_UNORM,
-            "OpenSharedHandle(ZipDepth input)");
-        validate_texture(d3d12_.Get(), request.output_texture_handle,
-            request.output_width, request.output_height,
-            DXGI_FORMAT_R32_FLOAT, "OpenSharedHandle(ZipDepth output)");
         const NetworkShape shape = network_shape(
             request.width, request.height, request.input_size);
         try {
-            std::lock_guard<std::mutex> lock(record_mutex_);
+            auto lifetime_guard = lifetime_->acquire();
             VulkanContext& context = executor_.context();
-            VulkanImage output = context.import_d3d12_image(
-                reinterpret_cast<void*>(request.output_texture_handle),
-                request.output_width, request.output_height,
-                VK_FORMAT_R32_SFLOAT,
-                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-            VulkanImage input = context.import_d3d12_image(
-                reinterpret_cast<void*>(request.shared_texture_handle),
-                request.width, request.height,
-                request.rgba ? VK_FORMAT_R8G8B8A8_UNORM :
-                               VK_FORMAT_B8G8R8A8_UNORM,
-                VK_IMAGE_USAGE_SAMPLED_BIT |
-                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            const VkFormat input_format = request.rgba ?
+                VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
+            const auto input_usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            const auto output_usage = VK_IMAGE_USAGE_STORAGE_BIT |
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            VulkanImage& input = input_cache_.get_or_create({
+                inferbridge::native_harness::stable_resource_identity(
+                    request.shared_texture_handle,
+                    request.shared_texture_identity), request.width,
+                request.height, input_format, input_usage}, [&] {
+                    validate_texture(d3d12_.Get(), request.shared_texture_handle,
+                        request.width, request.height,
+                        request.rgba ? DXGI_FORMAT_R8G8B8A8_UNORM :
+                            DXGI_FORMAT_B8G8R8A8_UNORM,
+                        "OpenSharedHandle(ZipDepth input)");
+                    return context.import_d3d12_image(
+                        reinterpret_cast<void*>(request.shared_texture_handle),
+                        request.width, request.height, input_format,
+                        input_usage);
+                });
+            VulkanImage& output = output_cache_.get_or_create({
+                inferbridge::native_harness::stable_resource_identity(
+                    request.output_texture_handle,
+                    request.output_texture_identity), request.output_width,
+                request.output_height, VK_FORMAT_R32_SFLOAT, output_usage}, [&] {
+                    validate_texture(d3d12_.Get(), request.output_texture_handle,
+                        request.output_width, request.output_height,
+                        DXGI_FORMAT_R32_FLOAT,
+                        "OpenSharedHandle(ZipDepth output)");
+                    return context.import_d3d12_image(
+                        reinterpret_cast<void*>(request.output_texture_handle),
+                        request.output_width, request.output_height,
+                        VK_FORMAT_R32_SFLOAT, output_usage);
+                });
             VulkanSemaphore wait = context.import_d3d12_fence(
                 reinterpret_cast<void*>(request.wait_fence_handle),
                 request.wait_fence_value);
@@ -239,8 +256,7 @@ public:
                         VK_ACCESS_SHADER_WRITE_BIT);
                 });
             return std::make_shared<ExternalJobImpl>(
-                shared_from_this(), std::move(input), std::move(output),
-                std::move(submission));
+                shared_from_this(), std::move(submission), lifetime_);
         } catch (...) { throw; }
 #endif
     }
@@ -256,7 +272,12 @@ private:
     GpuIo io_;
 #if defined(_WIN32)
     ComPtr<ID3D12Device> d3d12_;
-    std::mutex record_mutex_;
+    inferbridge::native_harness::StableResourceCache<VulkanImage>
+        input_cache_;
+    inferbridge::native_harness::StableResourceCache<VulkanImage>
+        output_cache_;
+    inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime_ =
+        inferbridge::native_harness::make_resource_lifetime_domain();
 #endif
 };
 

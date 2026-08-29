@@ -2,6 +2,7 @@
 #include "inferbridge_harness.h"
 
 #include "zipdepth_native.h"
+#include "inferbridge/native_harness_precision.h"
 #if defined(ZIPDEPTH_WITH_VULKAN)
 #include "external_gpu.h"
 #endif
@@ -551,6 +552,15 @@ ibrh_result IBRH_CALL model_load(
             "ZipDepth model path is missing");
     const std::string path = copy_string(request->model_path);
     const std::string parameters = copy_string(request->parameters_json);
+    inferbridge::native::Precision precision;
+    try {
+        precision = inferbridge::native::precision_from_parameters_json(
+            parameters);
+    } catch (const std::exception& error) {
+        return fail(runtime, IBRH_ERROR_INVALID_ARGUMENT, error.what());
+    }
+    const inferbridge::native::ScopedPrecisionRequest precision_scope(
+        precision);
     std::string weights;
     (void)json_string(parameters, "Weights", weights);
     auto* model = new (std::nothrow) ibrh_model();
@@ -737,11 +747,13 @@ ibrh_result IBRH_CALL submit(
         }
         job->gpu_admission = model->gpu_admissions;
         const zipdepth_native::ExternalTextureRequest gpu_request{
-                static_cast<uintptr_t>(input.native_handle), input.width, input.height,
+                static_cast<uintptr_t>(input.native_handle),
+                input.auxiliary_handle, input.width, input.height,
                 input.pixel_format == IBRH_PIXEL_RGBA8, network_size,
                 static_cast<uintptr_t>(source.synchronization.native_handle),
                 source.synchronization.value,
                 static_cast<uintptr_t>(destination.native_handle),
+                destination.auxiliary_handle,
                 destination.width, destination.height,
                 static_cast<uintptr_t>(target.synchronization.native_handle),
                 target.synchronization.value,

@@ -13,6 +13,7 @@
 #include "reduce_absmax_spv.h"
 #include "conv2d_spatial_int8_spv.h"
 #include "strip_attention_spv.h"
+#include "precision_pointwise_fp16_weights_spv.h"
 
 #include <algorithm>
 
@@ -33,6 +34,12 @@ ZipDepthOps::ZipDepthOps(midas_native::VulkanContext& c)
       context_reduce_(c.create_pipeline(midas_context_reduce_spv,midas_context_reduce_spv_size,3,8)),
       convex_(c.create_pipeline(midas_convex_upsample_spv,midas_convex_upsample_spv_size,3,8)),
       mobile_(c.create_pipeline(midas_mobile_upsample_spv,midas_mobile_upsample_spv_size,3,8)) {
+    if (c.supports_float16()) {
+        pointwise_fp16_weights_ = c.create_pipeline(
+            midas_precision_pointwise_fp16_weights_spv,
+            midas_precision_pointwise_fp16_weights_spv_size, 4, 16);
+        pointwise_fp16_weights_.set_debug_name("zipdepth_pointwise_fp16_weights");
+    }
     if (c.supports_packed_int8_dot()) {
         reduce_absmax_=c.create_pipeline(midas_reduce_absmax_spv,midas_reduce_absmax_spv_size,2,8);
         quantize_int8_=c.create_pipeline(midas_quantize_nchw_int8_spv,midas_quantize_nchw_int8_spv_size,3,12);
@@ -76,6 +83,12 @@ void ZipDepthOps::spatial_int8(midas_native::VulkanBuffer&o,const midas_native::
     context_.dispatch(quantize_int8_,{&packed,&i,&scale},&q,sizeof(q),up(width*height*(ic/4),256));
     struct P{std::uint32_t w,h,ic,oc,bias;}p{width,height,ic,oc,has_bias?1u:0u};
     context_.dispatch(spatial_int8_,{&o,&packed,&w,&scale,&ws,&b},&p,sizeof(p),up(width,8),up(height,8),oc);
+}
+
+void ZipDepthOps::pointwise_fp16_weights(midas_native::VulkanBuffer&o,const midas_native::VulkanBuffer&i,const midas_native::VulkanBuffer&w,const midas_native::VulkanBuffer&b,std::uint32_t spatial,std::uint32_t ic,std::uint32_t oc,bool has_bias){
+    if(!context_.supports_float16())throw std::runtime_error("FP16 pointwise convolution is unavailable");
+    struct P{std::uint32_t spatial,ic,oc,bias;}p{spatial,ic,oc,has_bias?1u:0u};
+    context_.dispatch(pointwise_fp16_weights_,{&o,&i,&w,&b},&p,sizeof(p),up(spatial*oc,64));
 }
 
 }  // namespace zipdepth_native
