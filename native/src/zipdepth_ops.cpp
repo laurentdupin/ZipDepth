@@ -64,8 +64,11 @@ void ZipDepthOps::mobile(midas_native::VulkanBuffer&o,const midas_native::Vulkan
 void ZipDepthOps::spatial_int8(midas_native::VulkanBuffer&o,const midas_native::VulkanBuffer&i,const midas_native::VulkanBuffer&w,const midas_native::VulkanBuffer&ws,const midas_native::VulkanBuffer&b,std::uint32_t width,std::uint32_t height,std::uint32_t ic,std::uint32_t oc,bool has_bias){
     if(!context_.supports_packed_int8_dot())throw std::runtime_error("packed INT8 dot product is not supported");
     if(ic%4!=0)throw std::invalid_argument("INT8 convolution channels must be divisible by four");
-    auto scale=context_.create_device_buffer(sizeof(float));
-    auto packed=context_.create_device_buffer(std::uint64_t(width)*height*(ic/4)*sizeof(std::uint32_t));
+    auto& scale=int8_workspace_.scales(sizeof(float),
+        [this](std::uint64_t bytes){return context_.create_device_buffer(bytes);});
+    auto& packed=int8_workspace_.packed(
+        std::uint64_t(width)*height*(ic/4)*sizeof(std::uint32_t),
+        [this](std::uint64_t bytes){return context_.create_device_buffer(bytes);});
     const std::uint32_t count=width*height*ic;
     const std::uint32_t reduction_groups=std::min(256u,up(count,4096));
     struct R{std::uint32_t count;float divisor;};
@@ -73,7 +76,9 @@ void ZipDepthOps::spatial_int8(midas_native::VulkanBuffer&o,const midas_native::
         const R reduce{count,127.0f};
         context_.dispatch(reduce_absmax_,{&i,&scale},&reduce,sizeof(reduce),1);
     }else{
-        auto partial=context_.create_device_buffer(reduction_groups*sizeof(float));
+        auto& partial=int8_workspace_.partial(
+            std::uint64_t(reduction_groups)*sizeof(float),
+            [this](std::uint64_t bytes){return context_.create_device_buffer(bytes);});
         const R first{count,1.0f};
         context_.dispatch(reduce_absmax_,{&i,&partial},&first,sizeof(first),reduction_groups);
         const R final{reduction_groups,127.0f};

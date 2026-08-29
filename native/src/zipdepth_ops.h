@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vulkan.h"
+#include <inferbridge/native_harness_int8_workspace.h>
 
 #include <cstdint>
 
@@ -68,6 +69,8 @@ public:
         std::uint32_t output_channels, bool has_bias);
 private:
     midas_native::VulkanContext& context_;
+    inferbridge::native::Int8ActivationWorkspace<midas_native::VulkanBuffer>
+        int8_workspace_;
     midas_native::VulkanPipeline elementwise_, channel_average_, strip_,
         adaptive_, nearest_, maxpool_, concat_, context_reduce_, convex_, mobile_,
         reduce_absmax_, quantize_int8_, spatial_int8_,
