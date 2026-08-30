@@ -5,6 +5,9 @@
 #include "vulkan_executor.h"
 #include "gpu_io.h"
 #endif
+#if defined(ZIPDEPTH_WITH_METAL)
+#include "metal_executor.h"
+#endif
 
 #include <algorithm>
 #include <memory>
@@ -29,6 +32,9 @@ struct zipdepth_context {
 #if defined(ZIPDEPTH_WITH_VULKAN)
     std::unique_ptr<zipdepth_native::VulkanExecutor> gpu;
     std::unique_ptr<zipdepth_native::GpuIo> gpu_io;
+#endif
+#if defined(ZIPDEPTH_WITH_METAL)
+    std::unique_ptr<zipdepth_native::MetalExecutor> metal;
 #endif
 };
 
@@ -119,6 +125,39 @@ zipdepth_status ZIPDEPTH_CALL zipdepth_infer_tensor_vulkan_f32(
         auto output = context->gpu->infer_device(std::move(input), width, height);
         vk.download(output.buffer, depth,
             static_cast<std::size_t>(std::uint64_t(width) * height * sizeof(float)));
+    });
+#endif
+}
+
+zipdepth_status ZIPDEPTH_CALL zipdepth_create_metal(
+    const char* model_path, zipdepth_context** output) {
+    if (!output || !model_path || !model_path[0])
+        return ZIPDEPTH_STATUS_INVALID_ARGUMENT;
+    *output = nullptr;
+#if !defined(ZIPDEPTH_WITH_METAL)
+    return ZIPDEPTH_STATUS_UNSUPPORTED;
+#else
+    return protect([&] {
+        auto context = std::make_unique<zipdepth_context>();
+        context->cpu = std::make_unique<zipdepth_native::CpuExecutor>(model_path);
+        context->metal = std::make_unique<zipdepth_native::MetalExecutor>(model_path);
+        *output = context.release();
+    });
+#endif
+}
+
+zipdepth_status ZIPDEPTH_CALL zipdepth_infer_tensor_metal_f32(
+    zipdepth_context* context, const float* rgb, uint32_t width,
+    uint32_t height, float* depth, uint64_t elements) {
+#if !defined(ZIPDEPTH_WITH_METAL)
+    (void)context;(void)rgb;(void)width;(void)height;(void)depth;(void)elements;
+    return ZIPDEPTH_STATUS_UNSUPPORTED;
+#else
+    if (!context || !context->metal || !rgb || !depth ||
+        elements < std::uint64_t(width) * height)
+        return ZIPDEPTH_STATUS_INVALID_ARGUMENT;
+    return protect([&] {
+        context->metal->infer(rgb, width, height, depth, elements);
     });
 #endif
 }

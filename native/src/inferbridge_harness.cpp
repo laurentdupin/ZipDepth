@@ -485,7 +485,12 @@ private:
             }
         }
         std::vector<float> temporary(static_cast<size_t>(plane));
-        const zipdepth_status result = zipdepth_infer_tensor_vulkan_f32(
+        const zipdepth_status result =
+#if defined(ZIPDEPTH_WITH_METAL)
+            zipdepth_infer_tensor_metal_f32(
+#else
+            zipdepth_infer_tensor_vulkan_f32(
+#endif
             work.context, rgb.data(), network_width, network_height,
             temporary.data(), temporary.size());
         if (result != ZIPDEPTH_STATUS_OK)
@@ -809,9 +814,14 @@ ibrh_result IBRH_CALL model_load(
     } else
 #endif
     {
-        const zipdepth_status status = zipdepth_create_vulkan(
+        const zipdepth_status status =
+#if defined(ZIPDEPTH_WITH_METAL)
+            zipdepth_create_metal(path.c_str(), &model->context);
+#else
+            zipdepth_create_vulkan(
             path.c_str(), static_cast<uint32_t>(runtime->vulkan_device_index),
             &model->context);
+#endif
         if (status != ZIPDEPTH_STATUS_OK) {
             const std::string message =
                 std::string("ZipDepth model load failed: ") + zipdepth_last_error();
