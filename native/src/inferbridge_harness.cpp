@@ -1101,13 +1101,12 @@ ibrh_result IBRH_CALL job_poll(
     if (status_size < sizeof(*status)) return IBRH_ERROR_STRUCT_TOO_SMALL;
     *status = {};
     status->struct_size = sizeof(*status);
+    status->state = job->state.load();
 #if defined(ZIPDEPTH_WITH_VULKAN)
-    if (!job->gpu_backed) {
+    if (job->gpu_backed && (job->state.load() == IBRH_JOB_FAILED ||
+        job->state.load() == IBRH_JOB_CANCELLED)) {
         status->state = job->state.load();
-    } else if (job->state.load() == IBRH_JOB_FAILED ||
-        job->state.load() == IBRH_JOB_CANCELLED) {
-        status->state = job->state.load();
-    } else {
+    } else if (job->gpu_backed) {
         std::lock_guard<std::mutex> lock(job->gpu_mutex);
         if (!job->gpu_job) {
             status->state = job->state.load();
@@ -1136,12 +1135,11 @@ ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
         job->state.store(IBRH_JOB_CANCELLED);
         std::lock_guard<std::mutex> lock(job->gpu_mutex);
         if (job->gpu_job) job->gpu_job->cancel();
-    } else {
-        job->cancel_requested.store(true);
+        return IBRH_OK;
     }
-    return IBRH_OK;
 #endif
-    return IBRH_ERROR_INVALID_STATE;
+    job->cancel_requested.store(true);
+    return IBRH_OK;
 }
 
 void IBRH_CALL job_release(ibrh_job* job) {
