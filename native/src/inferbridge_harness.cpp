@@ -927,22 +927,6 @@ ibrh_result IBRH_CALL submit(
         destination.height != expected_height ||
         destination.pixel_format != IBRH_PIXEL_DEPTH_FLOAT32)
         return IBRH_ERROR_INVALID_ARGUMENT;
-    const uint64_t input_bytes =
-        static_cast<uint64_t>(input.row_stride_bytes) * input.height;
-    const uint64_t output_bytes =
-        static_cast<uint64_t>(destination.row_stride_bytes) *
-            destination.height;
-    if (input.native_handle == 0u || destination.native_handle == 0u ||
-        static_cast<uint64_t>(input.row_stride_bytes) <
-            static_cast<uint64_t>(input.width) * 4u ||
-        static_cast<uint64_t>(destination.row_stride_bytes) <
-            static_cast<uint64_t>(destination.width) * sizeof(float) ||
-        destination.row_stride_bytes % sizeof(float) != 0u ||
-        input.byte_offset > input.byte_size ||
-        input_bytes > input.byte_size - input.byte_offset ||
-        destination.byte_offset > destination.byte_size ||
-        output_bytes > destination.byte_size - destination.byte_offset)
-        return IBRH_ERROR_INVALID_ARGUMENT;
 #if defined(ZIPDEPTH_WITH_VULKAN) && defined(_WIN32)
     if (input.domain == IBRH_RESOURCE_DOMAIN_D3D12) {
         if (!model->external_gpu || destination.domain != IBRH_RESOURCE_DOMAIN_D3D12 ||
@@ -1044,6 +1028,23 @@ ibrh_result IBRH_CALL submit(
         return IBRH_OK;
     }
 #endif
+    const uint64_t input_bytes =
+        static_cast<uint64_t>(input.row_stride_bytes) * input.height;
+    const uint64_t output_bytes =
+        static_cast<uint64_t>(destination.row_stride_bytes) *
+            destination.height;
+    if (input.native_handle == 0u || destination.native_handle == 0u ||
+        static_cast<uint64_t>(input.row_stride_bytes) <
+            static_cast<uint64_t>(input.width) * 4u ||
+        static_cast<uint64_t>(destination.row_stride_bytes) <
+            static_cast<uint64_t>(destination.width) * sizeof(float) ||
+        destination.row_stride_bytes % sizeof(float) != 0u ||
+        input.byte_offset > input.byte_size ||
+        input_bytes > input.byte_size - input.byte_offset ||
+        destination.byte_offset > destination.byte_size ||
+        output_bytes > destination.byte_size - destination.byte_offset)
+        return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                    "ZipDepth host buffer layout is invalid");
     if (input.domain != IBRH_RESOURCE_DOMAIN_HOST ||
         destination.domain != IBRH_RESOURCE_DOMAIN_HOST ||
         input.native_handle_type != IBRH_NATIVE_HANDLE_HOST_POINTER ||
