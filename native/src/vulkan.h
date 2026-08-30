@@ -10,6 +10,10 @@
 #  if !defined(VK_USE_PLATFORM_WIN32_KHR)
 #    define VK_USE_PLATFORM_WIN32_KHR
 #  endif
+#elif defined(__ANDROID__)
+#  if !defined(VK_USE_PLATFORM_ANDROID_KHR)
+#    define VK_USE_PLATFORM_ANDROID_KHR
+#  endif
 #endif
 #include <vulkan/vulkan.h>
 
@@ -57,6 +61,10 @@ struct VulkanExternalCapabilities {
     bool d3d12_bgra8_sampled_image_import = false;
     bool d3d12_rgba8_sampled_image_import = false;
     bool d3d12_r32_storage_image_import = false;
+#if defined(__ANDROID__)
+    bool android_hardware_buffer_import = false;
+    bool sync_fd_import = false;
+#endif
 };
 
 class VulkanSemaphore {
@@ -199,6 +207,14 @@ public:
         std::uint32_t height,
         VkFormat format,
         VkImageUsageFlags usage);
+#elif defined(__ANDROID__)
+    VulkanImage import_android_hardware_buffer(
+        void* hardware_buffer,
+        std::uint32_t width,
+        std::uint32_t height,
+        VkFormat format,
+        VkImageUsageFlags usage);
+    VulkanSemaphore import_sync_fd(int file_descriptor);
 #endif
 
     VulkanBuffer create_device_buffer(VkDeviceSize bytes);
@@ -291,10 +307,27 @@ public:
         try {
             std::forward<Function>(function)();
             batch_segmenting_enabled_ = false;
-            end_batch();
+            if (batch_segments_.empty()) {
+                end_batch();
+            } else {
+                if (batch_has_dispatch_) {
+                    batch_segments_.push_back(end_batch_async({}, {}));
+                } else {
+                    cancel_batch();
+                }
+                // Queue ordering means completion of the final segment also
+                // completes every earlier segment. Retain their descriptors
+                // and buffers until that point, then recycle them together.
+                batch_segments_.back().wait();
+                batch_segments_.clear();
+            }
         } catch (...) {
             batch_segmenting_enabled_ = false;
             cancel_batch();
+            if (!batch_segments_.empty()) {
+                try { batch_segments_.back().wait(); } catch (...) {}
+                batch_segments_.clear();
+            }
             throw;
         }
     }
@@ -401,6 +434,7 @@ private:
     bool batch_has_dispatch_ = false;
     bool batch_segmenting_enabled_ = false;
     std::uint32_t batch_dispatch_count_ = 0;
+    std::vector<VulkanSubmission> batch_segments_;
     bool track_resource_hazards_ = true;
     std::vector<VulkanBatchedDescriptor> batch_descriptor_sets_;
     std::vector<VulkanDeferredBuffer> batch_deferred_buffers_;
@@ -421,6 +455,10 @@ private:
         get_memory_win32_handle_properties_ = nullptr;
     PFN_vkImportSemaphoreWin32HandleKHR
         import_semaphore_win32_handle_ = nullptr;
+#elif defined(__ANDROID__)
+    PFN_vkGetAndroidHardwareBufferPropertiesANDROID
+        get_android_hardware_buffer_properties_ = nullptr;
+    PFN_vkImportSemaphoreFdKHR import_semaphore_fd_ = nullptr;
 #endif
     std::atomic<std::uint64_t> tensor_upload_bytes_{0};
     std::atomic<std::uint64_t> tensor_download_bytes_{0};

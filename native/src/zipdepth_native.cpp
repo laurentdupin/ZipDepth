@@ -3,6 +3,7 @@
 #include "cpu_executor.h"
 #if defined(ZIPDEPTH_WITH_VULKAN)
 #include "vulkan_executor.h"
+#include "gpu_io.h"
 #endif
 
 #include <algorithm>
@@ -10,11 +11,24 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <android/hardware_buffer.h>
+#include <atomic>
+#include <chrono>
+#endif
+
+#if defined(__ANDROID__) && defined(ZIPDEPTH_WITH_VULKAN)
+struct ZipDepthAndroidImage {
+    midas_native::VulkanImage image;
+};
+#endif
 
 struct zipdepth_context {
     std::unique_ptr<zipdepth_native::CpuExecutor> cpu;
 #if defined(ZIPDEPTH_WITH_VULKAN)
     std::unique_ptr<zipdepth_native::VulkanExecutor> gpu;
+    std::unique_ptr<zipdepth_native::GpuIo> gpu_io;
 #endif
 };
 
@@ -77,6 +91,8 @@ zipdepth_status ZIPDEPTH_CALL zipdepth_create_vulkan(
 #if defined(ZIPDEPTH_WITH_VULKAN)
         context->gpu = std::make_unique<zipdepth_native::VulkanExecutor>(
             model_path, device_index);
+        context->gpu_io = std::make_unique<zipdepth_native::GpuIo>(
+            context->gpu->context());
 #else
         (void)device_index;
 #endif
@@ -106,6 +122,97 @@ zipdepth_status ZIPDEPTH_CALL zipdepth_infer_tensor_vulkan_f32(
     });
 #endif
 }
+
+#if defined(__ANDROID__)
+zipdepth_status ZIPDEPTH_CALL
+zipdepth_infer_android_hardware_buffer_vulkan_f32(
+    zipdepth_context* context, void* android_hardware_buffer,
+    uint64_t hardware_buffer_id,
+    int acquire_fence_fd, uint32_t source_width, uint32_t source_height,
+    uint32_t network_width, uint32_t network_height, float* depth,
+    uint64_t elements) {
+#if !defined(ZIPDEPTH_WITH_VULKAN)
+    (void)context;(void)android_hardware_buffer;(void)hardware_buffer_id;
+    (void)acquire_fence_fd;
+    (void)source_width;(void)source_height;(void)network_width;
+    (void)network_height;(void)depth;(void)elements;
+    return ZIPDEPTH_STATUS_VULKAN_UNAVAILABLE;
+#else
+    if (!context || !context->gpu || !context->gpu_io ||
+        !android_hardware_buffer || !source_width || !source_height ||
+        !network_width || !network_height || !depth ||
+        elements < std::uint64_t(network_width) * network_height) {
+        return ZIPDEPTH_STATUS_INVALID_ARGUMENT;
+    }
+    return protect([&] {
+        using Clock = std::chrono::steady_clock;
+        const auto started = Clock::now();
+        auto& vk = context->gpu->context();
+        const uint64_t image_id = hardware_buffer_id != 0u
+            ? hardware_buffer_id
+            : uint64_t(reinterpret_cast<uintptr_t>(android_hardware_buffer));
+        (void)image_id;
+        const bool cache_hit = false;
+        // AImageReader may recycle an allocation as soon as both display and
+        // inference release it. Qualcomm's imported-memory lifetime cannot be
+        // cached safely across that recycling boundary, so keep the import
+        // strictly inside the retained input frame's job.
+        auto imported = std::make_unique<ZipDepthAndroidImage>();
+        imported->image = vk.import_android_hardware_buffer(
+            android_hardware_buffer, source_width, source_height,
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+        auto& image = imported->image;
+        const auto imported_at = Clock::now();
+        midas_native::VulkanSemaphore wait;
+        if (acquire_fence_fd >= 0) {
+            wait = vk.import_sync_fd(acquire_fence_fd);
+        }
+        auto input = vk.create_device_buffer(
+            std::uint64_t(3u) * network_width * network_height * sizeof(float));
+        midas_native::VulkanBuffer output;
+        auto submission = vk.batch_async(
+            std::move(wait), {}, [&] {
+                vk.acquire_external_image(
+                    image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_SHADER_READ_BIT);
+                context->gpu_io->preprocess(
+                    input, image, network_width, network_height);
+                auto inferred = context->gpu->infer_device(
+                    std::move(input), network_width, network_height);
+                context->gpu_io->normalize_relative(
+                    inferred.buffer, network_width * network_height);
+                output = std::move(inferred.buffer);
+                vk.release_external_image(
+                    image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_SHADER_READ_BIT);
+            });
+        submission.wait();
+        const auto inferred_at = Clock::now();
+        vk.download(output, depth,
+            static_cast<std::size_t>(
+                std::uint64_t(network_width) * network_height * sizeof(float)));
+        const auto finished = Clock::now();
+        static std::atomic<uint64_t> count{0u};
+        const uint64_t current = ++count;
+        if (current <= 5u || current % 30u == 0u) {
+            const auto milliseconds = [](auto begin, auto end) {
+                return std::chrono::duration<double, std::milli>(
+                    end - begin).count();
+            };
+            __android_log_print(ANDROID_LOG_INFO, "ZipDepthAHB",
+                "frame=%llu cached=%d import=%.3f gpu=%.3f download=%.3f total=%.3f",
+                static_cast<unsigned long long>(current), cache_hit ? 1 : 0,
+                milliseconds(started, imported_at),
+                milliseconds(imported_at, inferred_at),
+                milliseconds(inferred_at, finished),
+                milliseconds(started, finished));
+        }
+    });
+#endif
+}
+#endif
 
 void ZIPDEPTH_CALL zipdepth_destroy(zipdepth_context* context) {
     delete context;

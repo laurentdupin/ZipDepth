@@ -19,7 +19,54 @@ HEADER = struct.Struct("<8sIIIIQQQQQ")
 RECORD = struct.Struct("<112sII4QQQQIIQ")
 METADATA = struct.Struct("<8sIIIIII32s64s")
 KINDS = {"base_gpu": 0, "base_mobile": 1}
-CONVERTER = "zipdepth-export-pytorch-v1"
+CONVERTER = "zipdepth-export-pytorch-v2-reparameterized"
+
+
+def _fuse_conv_bn(state, convolution: str, batch_norm: str):
+    """Return the inference convolution equivalent to Conv2d + BatchNorm."""
+    weight = state[convolution]
+    mean = state[f"{batch_norm}.running_mean"]
+    variance = state[f"{batch_norm}.running_var"]
+    gamma = state[f"{batch_norm}.weight"]
+    beta = state[f"{batch_norm}.bias"]
+    scale = gamma / (variance + 1.0e-5).sqrt()
+    return weight * scale.reshape(-1, 1, 1, 1), beta - mean * scale
+
+
+def add_reparameterized_blocks(state):
+    """Embed exact single-convolution forms of every QARepBlock.
+
+    The canonical checkpoint remains present for compatibility with the CPU
+    executor.  Vulkan can select these derived tensors and avoid executing the
+    3x3 and 1x1 branches, two batch-normalizations, and their additions at
+    runtime.
+    """
+    prefixes = sorted({
+        name.removesuffix(".branch_3x3.0.weight")
+        for name in state
+        if name.endswith(".branch_3x3.0.weight")
+    })
+    for prefix in prefixes:
+        kernel3, bias3 = _fuse_conv_bn(
+            state, f"{prefix}.branch_3x3.0.weight",
+            f"{prefix}.branch_3x3.1")
+        kernel1, bias1 = _fuse_conv_bn(
+            state, f"{prefix}.branch_1x1.0.weight",
+            f"{prefix}.branch_1x1.1")
+        kernel = kernel3 + __import__("torch").nn.functional.pad(
+            kernel1, (1, 1, 1, 1))
+        bias = bias3 + bias1
+        output_channels, grouped_input_channels = kernel.shape[:2]
+        # QARepBlock only has an identity when input/output channels match and
+        # stride is one. Downsampling blocks in this graph change channels.
+        if output_channels == grouped_input_channels:
+            identity = __import__("torch").zeros_like(kernel)
+            indices = __import__("torch").arange(output_channels)
+            identity[indices, indices, 1, 1] = 1.0
+            kernel = kernel + identity
+        state[f"{prefix}.fused_conv.weight"] = kernel.contiguous()
+        state[f"{prefix}.fused_conv.bias"] = bias.contiguous()
+    return len(prefixes)
 
 
 def align(value: int) -> int:
@@ -49,6 +96,8 @@ def main() -> None:
     state = loaded.get("model_state_dict", loaded)
     if not isinstance(state, dict) or not state:
         raise TypeError("checkpoint is not a non-empty state dictionary")
+    state = dict(state)
+    fused_block_count = add_reparameterized_blocks(state)
     tensors = []
     for name in sorted(state):
         value = state[name]
@@ -102,6 +151,7 @@ def main() -> None:
             "canonical_sha256": canonical.hex(), "converter": CONVERTER,
             "format_version": VERSION,
             "cache_key": f"zipdepth:{canonical.hex()}:{CONVERTER}:{VERSION}:{args.variant}",
+            "reparameterized_block_count": fused_block_count,
         },
     }
     print(json.dumps(receipt, indent=2))

@@ -70,6 +70,20 @@ ZIPDEPTH_API zipdepth_status ZIPDEPTH_CALL zipdepth_infer_tensor_vulkan_f32(
     uint32_t height,
     float* depth_hw,
     uint64_t depth_elements);
+#if defined(__ANDROID__)
+ZIPDEPTH_API zipdepth_status ZIPDEPTH_CALL
+zipdepth_infer_android_hardware_buffer_vulkan_f32(
+    zipdepth_context* context,
+    void* android_hardware_buffer,
+    uint64_t hardware_buffer_id,
+    int acquire_fence_fd,
+    uint32_t source_width,
+    uint32_t source_height,
+    uint32_t network_width,
+    uint32_t network_height,
+    float* depth_hw,
+    uint64_t depth_elements);
+#endif
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,10 @@
 #include <memory>
 #include <stdexcept>
 #include <utility>
+#if defined(__ANDROID__)
+#include <android/hardware_buffer.h>
+#include <unistd.h>
+#endif
 #include <vector>
 
 namespace midas_native {
@@ -314,6 +318,18 @@ VulkanContext::VulkanContext(
         enabled_extensions.push_back(
             VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME);
     }
+    const bool has_android_hardware_buffer = has_extension(
+        extensions, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+    const bool has_external_semaphore_fd = has_extension(
+        extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    if (has_android_hardware_buffer) {
+        enabled_extensions.push_back(
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+    }
+    if (has_external_semaphore_fd) {
+        enabled_extensions.push_back(
+            VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    }
 #endif
 #if defined(_WIN32)
     const bool has_external_memory_win32 = has_extension(
@@ -537,6 +553,18 @@ VulkanContext::VulkanContext(
     external_capabilities_.d3d12_fence_import =
         external_capabilities_.d3d12_fence_import &&
         import_semaphore_win32_handle_ != nullptr;
+#elif defined(__ANDROID__)
+    get_android_hardware_buffer_properties_ = reinterpret_cast<
+        PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
+            vkGetDeviceProcAddr(
+                device_, "vkGetAndroidHardwareBufferPropertiesANDROID"));
+    import_semaphore_fd_ = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+        vkGetDeviceProcAddr(device_, "vkImportSemaphoreFdKHR"));
+    external_capabilities_.android_hardware_buffer_import =
+        has_android_hardware_buffer &&
+        get_android_hardware_buffer_properties_ != nullptr;
+    external_capabilities_.sync_fd_import =
+        has_external_semaphore_fd && import_semaphore_fd_ != nullptr;
 #endif
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
 
@@ -555,13 +583,16 @@ VulkanContext::VulkanContext(
     const VkDescriptorPoolSize pool_sizes[] = {
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 256},
     };
     const VkDescriptorPoolCreateInfo descriptor_pool_info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         nullptr,
         VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
         1024,
-        2,
+        static_cast<std::uint32_t>(
+            sizeof(pool_sizes) / sizeof(pool_sizes[0])),
         pool_sizes,
     };
     check(
@@ -1107,6 +1138,175 @@ VulkanSemaphore VulkanContext::import_d3d12_fence(
 
 #endif
 
+#if defined(__ANDROID__)
+VulkanImage VulkanContext::import_android_hardware_buffer(
+    void* hardware_buffer,
+    std::uint32_t width,
+    std::uint32_t height,
+    VkFormat format,
+    VkImageUsageFlags usage) {
+    if (!external_capabilities_.android_hardware_buffer_import) {
+        throw std::runtime_error(
+            "Vulkan device cannot import Android hardware buffers");
+    }
+    auto* buffer = static_cast<AHardwareBuffer*>(hardware_buffer);
+    if (buffer == nullptr || width == 0u || height == 0u ||
+        format == VK_FORMAT_UNDEFINED ||
+        (usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u) {
+        throw std::invalid_argument("invalid Android hardware buffer image");
+    }
+    VkAndroidHardwareBufferFormatPropertiesANDROID format_properties{
+        VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID,
+    };
+    VkAndroidHardwareBufferPropertiesANDROID properties{
+        VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+        &format_properties,
+    };
+    check(get_android_hardware_buffer_properties_(
+        device_, buffer, &properties),
+        "vkGetAndroidHardwareBufferPropertiesANDROID");
+    if (format_properties.format != VK_FORMAT_UNDEFINED &&
+        format_properties.format != format) {
+        throw std::runtime_error(
+            "Android hardware buffer Vulkan format does not match RGBA8");
+    }
+
+    VulkanImage result;
+    result.owner_ = this;
+    result.format_ = format;
+    result.width_ = width;
+    result.height_ = height;
+    const VkExternalMemoryImageCreateInfo external_image{
+        VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        nullptr,
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
+    };
+    const VkImageCreateInfo image_info{
+        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        &external_image,
+        0,
+        VK_IMAGE_TYPE_2D,
+        format,
+        {width, height, 1},
+        1,
+        1,
+        VK_SAMPLE_COUNT_1_BIT,
+        VK_IMAGE_TILING_OPTIMAL,
+        usage,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        nullptr,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    check(vkCreateImage(device_, &image_info, nullptr, &result.image_),
+        "vkCreateImage(Android hardware buffer import)");
+    try {
+        VkMemoryRequirements requirements{};
+        vkGetImageMemoryRequirements(device_, result.image_, &requirements);
+        const VkImportAndroidHardwareBufferInfoANDROID import{
+            VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+            nullptr,
+            buffer,
+        };
+        const VkMemoryDedicatedAllocateInfo dedicated{
+            VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+            &import,
+            result.image_,
+            VK_NULL_HANDLE,
+        };
+        const VkMemoryAllocateInfo allocation{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            &dedicated,
+            properties.allocationSize,
+            find_memory_type(
+                requirements.memoryTypeBits & properties.memoryTypeBits, 0),
+        };
+        check(vkAllocateMemory(device_, &allocation, nullptr, &result.memory_),
+            "vkAllocateMemory(Android hardware buffer import)");
+        check(vkBindImageMemory(device_, result.image_, result.memory_, 0),
+            "vkBindImageMemory(Android hardware buffer import)");
+        const VkImageViewCreateInfo view_info{
+            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            nullptr,
+            0,
+            result.image_,
+            VK_IMAGE_VIEW_TYPE_2D,
+            format,
+            {
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        };
+        check(vkCreateImageView(device_, &view_info, nullptr, &result.view_),
+            "vkCreateImageView(Android hardware buffer import)");
+        const VkSamplerCreateInfo sampler_info{
+            VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            nullptr,
+            0,
+            VK_FILTER_NEAREST,
+            VK_FILTER_NEAREST,
+            VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            0.0f,
+            VK_FALSE,
+            1.0f,
+            VK_FALSE,
+            VK_COMPARE_OP_ALWAYS,
+            0.0f,
+            0.0f,
+            VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+            VK_FALSE,
+        };
+        check(vkCreateSampler(device_, &sampler_info, nullptr, &result.sampler_),
+            "vkCreateSampler(Android hardware buffer import)");
+        return result;
+    } catch (...) {
+        throw;
+    }
+}
+
+VulkanSemaphore VulkanContext::import_sync_fd(int file_descriptor) {
+    if (!external_capabilities_.sync_fd_import || file_descriptor < 0) {
+        throw std::invalid_argument("invalid Android sync fence");
+    }
+    const int duplicate = dup(file_descriptor);
+    if (duplicate < 0) {
+        throw std::runtime_error("could not duplicate Android sync fence");
+    }
+    VulkanSemaphore result;
+    result.owner_ = this;
+    const VkSemaphoreCreateInfo semaphore_info{
+        VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        nullptr,
+        0,
+    };
+    try {
+        check(vkCreateSemaphore(
+            device_, &semaphore_info, nullptr, &result.semaphore_),
+            "vkCreateSemaphore(Android sync fd import)");
+        const VkImportSemaphoreFdInfoKHR import{
+            VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+            nullptr,
+            result.semaphore_,
+            VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+            duplicate,
+        };
+        check(import_semaphore_fd_(device_, &import),
+            "vkImportSemaphoreFdKHR");
+        return result;
+    } catch (...) {
+        close(duplicate);
+        throw;
+    }
+}
+#endif
+
 VulkanBuffer VulkanContext::create_host_buffer(VkDeviceSize bytes) {
     auto best = host_buffer_pool_.end();
     for (auto candidate = host_buffer_pool_.begin();
@@ -1312,7 +1512,9 @@ VulkanSubmission VulkanContext::end_batch_async(
     batch_dispatch_count_ = 0;
     try {
         VulkanSubmission result = submit_commands(
-            command, &resources->wait, &resources->signal);
+            command,
+            resources->wait.owner_ ? &resources->wait : nullptr,
+            resources->signal.owner_ ? &resources->signal : nullptr);
         result.resources_ = resources.release();
         return result;
     } catch (...) {
@@ -1399,6 +1601,10 @@ void VulkanContext::download(
     g_tensor_download_bytes.fetch_add(
         static_cast<std::uint64_t>(bytes),
         std::memory_order_relaxed);
+    if (source.mapped_ != nullptr) {
+        std::memcpy(data, source.mapped_, bytes);
+        return;
+    }
     VulkanBuffer staging = create_host_buffer(bytes);
     copy_buffer(source.buffer_, staging.buffer_, bytes);
     std::memcpy(data, staging.mapped_, bytes);
@@ -1496,6 +1702,11 @@ void VulkanContext::acquire_external_image(
         throw std::invalid_argument(
             "external image acquire requires an active batch");
     }
+#if defined(__ANDROID__)
+    constexpr std::uint32_t external_queue = VK_QUEUE_FAMILY_FOREIGN_EXT;
+#else
+    constexpr std::uint32_t external_queue = VK_QUEUE_FAMILY_EXTERNAL;
+#endif
     const VkImageMemoryBarrier barrier{
         VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         nullptr,
@@ -1503,7 +1714,7 @@ void VulkanContext::acquire_external_image(
         destination_access,
         VK_IMAGE_LAYOUT_GENERAL,
         layout,
-        VK_QUEUE_FAMILY_EXTERNAL,
+        external_queue,
         queue_family_,
         image.image_,
         {
@@ -1537,6 +1748,11 @@ void VulkanContext::release_external_image(
         throw std::invalid_argument(
             "external image release requires an active batch");
     }
+#if defined(__ANDROID__)
+    constexpr std::uint32_t external_queue = VK_QUEUE_FAMILY_FOREIGN_EXT;
+#else
+    constexpr std::uint32_t external_queue = VK_QUEUE_FAMILY_EXTERNAL;
+#endif
     const VkImageMemoryBarrier barrier{
         VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         nullptr,
@@ -1545,7 +1761,7 @@ void VulkanContext::release_external_image(
         layout,
         VK_IMAGE_LAYOUT_GENERAL,
         queue_family_,
-        VK_QUEUE_FAMILY_EXTERNAL,
+        external_queue,
         image.image_,
         {
             VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2078,11 +2294,26 @@ void VulkanContext::dispatch_resources(
         // OpenXR queue to run between them. A whole-network batch can occupy
         // Adreno for more than one display period, while one submission per
         // operator loses most inference throughput to synchronization.
-        constexpr std::uint32_t kAndroidBatchDispatchLimit = 2;
+        // Keep command buffers short enough for the XR renderer to be
+        // scheduled between them. Segments are submitted asynchronously on
+        // the ordered compute queue; only the final segment is waited, rather
+        // than blocking the CPU and GPU after every small group.
+        constexpr std::uint32_t kAndroidBatchDispatchLimit = 16;
         if (batch_segmenting_enabled_ &&
             batch_dispatch_count_ >= kAndroidBatchDispatchLimit) {
-            end_batch();
+            batch_segments_.push_back(end_batch_async({}, {}));
             begin_batch();
+            const VkMemoryBarrier continuation_barrier{
+                VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                nullptr,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            };
+            vkCmdPipelineBarrier(
+                batch_command_,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0, 1, &continuation_barrier, 0, nullptr, 0, nullptr);
         }
 #endif
     } else {

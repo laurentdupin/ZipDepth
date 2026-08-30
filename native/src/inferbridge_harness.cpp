@@ -9,6 +9,8 @@
 
 #include <atomic>
 #include <algorithm>
+#include <chrono>
+#include <cerrno>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -22,6 +24,13 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(__ANDROID__)
+#include <android/hardware_buffer.h>
+#include <android/log.h>
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 struct ibrh_runtime {
     std::string error;
@@ -96,6 +105,7 @@ namespace {
 thread_local std::string g_last_error;
 constexpr char kHarnessId[] = "inferbridge.zipdepth.native";
 constexpr char kHarnessVersion[] = "1.1.0";
+
 
 ibrh_result fail(
     ibrh_runtime* runtime, ibrh_result result, const std::string& message) {
@@ -212,6 +222,13 @@ void network_dimensions(
     };
     width = aligned_size(input_width * scale);
     height = aligned_size(input_height * scale);
+#if defined(__ANDROID__)
+    // Keep the mobile path's vertical detail while limiting the wide-screen
+    // tensor area that dominates compute on the Quest. The preprocessor still
+    // samples the complete source frame and the result maps back over its full UV
+    // range; only the network's internal horizontal representation is compressed.
+    if (width > height) width = aligned_size(height);
+#endif
 }
 
 ibrh_result status_result(zipdepth_status status) {
@@ -248,6 +265,10 @@ public:
         uint32_t network_size = 0;
         float* destination = nullptr;
         uint32_t destination_stride = 0;
+        void* android_hardware_buffer = nullptr;
+        uint64_t android_hardware_buffer_id = 0u;
+		int acquire_fence_fd = -1;
+		std::chrono::steady_clock::time_point enqueued_at{};
     };
 
     ZipDepthHostWorker() : thread_([this] { run(); }) {}
@@ -266,8 +287,9 @@ public:
         if (thread_.joinable()) thread_.join();
     }
 
-    bool enqueue(Work work) {
-        retain_job(work.job);
+	bool enqueue(Work work) {
+		work.enqueued_at = std::chrono::steady_clock::now();
+		retain_job(work.job);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (stopping_) {
@@ -281,6 +303,116 @@ public:
     }
 
 private:
+#if defined(__ANDROID__)
+    bool read_android_luma(
+        const Work& work, uint32_t width, uint32_t height,
+        std::vector<uint8_t>& luma) {
+        auto* buffer = static_cast<AHardwareBuffer*>(
+            work.android_hardware_buffer);
+        if (buffer == nullptr) return false;
+        void* address = nullptr;
+        int wait_fence = work.acquire_fence_fd >= 0
+            ? dup(work.acquire_fence_fd) : -1;
+        const int locked = AHardwareBuffer_lock(
+            buffer, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY,
+            wait_fence, nullptr, &address);
+        if (wait_fence >= 0) close(wait_fence);
+        if (locked != 0 || address == nullptr) return false;
+        AHardwareBuffer_Desc description{};
+        AHardwareBuffer_describe(buffer, &description);
+        luma.resize(static_cast<size_t>(width) * height);
+        const auto* source = static_cast<const uint8_t*>(address);
+        const size_t source_stride = static_cast<size_t>(description.stride) * 4u;
+        for (uint32_t y = 0u; y < height; ++y) {
+            const uint32_t source_y = std::min(
+                work.height - 1u, static_cast<uint32_t>(
+                    static_cast<uint64_t>(y) * work.height / height));
+            for (uint32_t x = 0u; x < width; ++x) {
+                const uint32_t source_x = std::min(
+                    work.width - 1u, static_cast<uint32_t>(
+                        static_cast<uint64_t>(x) * work.width / width));
+                const uint8_t* pixel = source +
+                    static_cast<size_t>(source_y) * source_stride +
+                    static_cast<size_t>(source_x) * 4u;
+                luma[static_cast<size_t>(y) * width + x] =
+                    static_cast<uint8_t>((77u * pixel[0] +
+                        150u * pixel[1] + 29u * pixel[2]) >> 8u);
+            }
+        }
+        int release_fence = -1;
+        AHardwareBuffer_unlock(buffer, &release_fence);
+        if (release_fence >= 0) {
+            pollfd descriptor{release_fence, POLLIN, 0};
+            while (poll(&descriptor, 1, -1) < 0 && errno == EINTR) {}
+            close(release_fence);
+        }
+        return true;
+    }
+
+    void temporal_warp(
+        const std::vector<uint8_t>& current_luma,
+        uint32_t width, uint32_t height,
+        std::vector<float>& depth) const {
+        depth.resize(static_cast<size_t>(width) * height);
+        constexpr int block = 16;
+        constexpr int search = 6;
+        constexpr int sample_step = 2;
+        for (int block_y = 0; block_y < static_cast<int>(height);
+                block_y += block) {
+            for (int block_x = 0; block_x < static_cast<int>(width);
+                    block_x += block) {
+                int best_dx = 0;
+                int best_dy = 0;
+                uint64_t best_error = std::numeric_limits<uint64_t>::max();
+                for (int dy = -search; dy <= search; dy += 2) {
+                    for (int dx = -search; dx <= search; dx += 2) {
+                        uint64_t error = 0u;
+                        uint32_t samples = 0u;
+                        for (int y = 0; y < block; y += sample_step) {
+                            const int cy = block_y + y;
+                            const int py = cy + dy;
+                            if (cy >= static_cast<int>(height) || py < 0 ||
+                                py >= static_cast<int>(height)) continue;
+                            for (int x = 0; x < block; x += sample_step) {
+                                const int cx = block_x + x;
+                                const int px = cx + dx;
+                                if (cx >= static_cast<int>(width) || px < 0 ||
+                                    px >= static_cast<int>(width)) continue;
+                                const int difference = static_cast<int>(
+                                    current_luma[static_cast<size_t>(cy) * width + cx]) -
+                                    static_cast<int>(previous_luma_[
+                                        static_cast<size_t>(py) * width + px]);
+                                error += static_cast<uint64_t>(std::abs(difference));
+                                ++samples;
+                            }
+                        }
+                        if (samples != 0u) error = error * 64u / samples;
+                        if (error < best_error) {
+                            best_error = error;
+                            best_dx = dx;
+                            best_dy = dy;
+                        }
+                    }
+                }
+                for (int y = 0; y < block; ++y) {
+                    const int cy = block_y + y;
+                    if (cy >= static_cast<int>(height)) break;
+                    for (int x = 0; x < block; ++x) {
+                        const int cx = block_x + x;
+                        if (cx >= static_cast<int>(width)) break;
+                        const int px = std::clamp(cx + best_dx, 0,
+                            static_cast<int>(width) - 1);
+                        const int py = std::clamp(cy + best_dy, 0,
+                            static_cast<int>(height) - 1);
+                        depth[static_cast<size_t>(cy) * width + cx] =
+                            previous_depth_[static_cast<size_t>(py) * width + px];
+                    }
+                }
+            }
+        }
+    }
+#endif
+
     void execute(const Work& work) {
         uint32_t network_width = 0u;
         uint32_t network_height = 0u;
@@ -289,6 +421,47 @@ private:
             network_width, network_height);
         const uint64_t plane = static_cast<uint64_t>(network_width) *
             network_height;
+#if defined(__ANDROID__)
+        if (work.android_hardware_buffer != nullptr) {
+            std::vector<uint8_t> current_luma;
+            const bool have_luma = read_android_luma(
+                work, network_width, network_height, current_luma);
+            const bool temporal = have_luma &&
+                previous_width_ == network_width &&
+                previous_height_ == network_height &&
+                previous_luma_.size() == static_cast<size_t>(plane) &&
+                previous_depth_.size() == static_cast<size_t>(plane) &&
+                (android_frame_count_ & 1u) != 0u;
+            std::vector<float> temporary(static_cast<size_t>(plane));
+            if (temporal) {
+                temporal_warp(
+                    current_luma, network_width, network_height, temporary);
+            } else {
+                const zipdepth_status result =
+                    zipdepth_infer_android_hardware_buffer_vulkan_f32(
+                        work.context, work.android_hardware_buffer,
+                        work.android_hardware_buffer_id,
+                        work.acquire_fence_fd, work.width, work.height,
+                        network_width, network_height, temporary.data(),
+                        temporary.size());
+                if (result != ZIPDEPTH_STATUS_OK) {
+                    throw std::runtime_error(zipdepth_last_error());
+                }
+            }
+            ++android_frame_count_;
+            if (have_luma) previous_luma_ = std::move(current_luma);
+            previous_depth_ = temporary;
+            previous_width_ = network_width;
+            previous_height_ = network_height;
+            for (uint32_t y = 0; y < network_height; ++y) {
+                std::copy_n(
+                    temporary.data() + uint64_t(y) * network_width,
+                    network_width,
+                    work.destination + uint64_t(y) * work.destination_stride);
+            }
+            return;
+        }
+#endif
         std::vector<float> rgb(static_cast<size_t>(plane) * 3u);
         for (uint32_t y = 0; y < network_height; ++y) {
             const uint32_t source_y = std::min(
@@ -331,16 +504,27 @@ private:
                     static_cast<uint64_t>(y) * work.destination_stride);
     }
 
-    void run() {
-        for (;;) {
+	void run() {
+		using Clock = std::chrono::steady_clock;
+		auto previous_finished = Clock::now();
+		double queue_wait_total_ms = 0.0;
+		double execute_total_ms = 0.0;
+		double idle_total_ms = 0.0;
+		uint64_t sample_count = 0u;
+		for (;;) {
             Work work;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 condition_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
                 if (stopping_ && queue_.empty()) return;
-                work = queue_.front();
-                queue_.pop_front();
-            }
+				work = queue_.front();
+				queue_.pop_front();
+			}
+			const auto dequeued_at = Clock::now();
+			const double queue_wait_ms = std::chrono::duration<double, std::milli>(
+				dequeued_at - work.enqueued_at).count();
+			const double idle_ms = std::chrono::duration<double, std::milli>(
+				dequeued_at - previous_finished).count();
             uint32_t queued = IBRH_JOB_QUEUED;
             if (work.job->cancel_requested.load()) {
                 work.job->state.store(IBRH_JOB_CANCELLED);
@@ -355,8 +539,25 @@ private:
                 } catch (...) {
                     work.job->state.store(IBRH_JOB_FAILED);
                 }
-            }
-            release_job(work.job);
+			}
+			const auto finished_at = Clock::now();
+			queue_wait_total_ms += queue_wait_ms;
+			execute_total_ms += std::chrono::duration<double, std::milli>(
+				finished_at - dequeued_at).count();
+			idle_total_ms += idle_ms;
+			previous_finished = finished_at;
+			++sample_count;
+#if defined(__ANDROID__)
+			if (sample_count % 30u == 0u) {
+				__android_log_print(ANDROID_LOG_INFO, "ZipDepthWorker",
+					"frames=%llu queue_avg=%.3f execute_avg=%.3f idle_avg=%.3f",
+					static_cast<unsigned long long>(sample_count),
+					queue_wait_total_ms / sample_count,
+					execute_total_ms / sample_count,
+					idle_total_ms / sample_count);
+			}
+#endif
+			release_job(work.job);
         }
     }
 
@@ -365,6 +566,13 @@ private:
     std::deque<Work> queue_;
     bool stopping_ = false;
     std::thread thread_;
+#if defined(__ANDROID__)
+    std::vector<uint8_t> previous_luma_;
+    std::vector<float> previous_depth_;
+    uint32_t previous_width_ = 0u;
+    uint32_t previous_height_ = 0u;
+    uint64_t android_frame_count_ = 0u;
+#endif
 };
 
 #if defined(ZIPDEPTH_WITH_VULKAN)
@@ -467,6 +675,13 @@ ibrh_result IBRH_CALL query_capabilities(
     capabilities->maximum_inputs = 1u;
     capabilities->maximum_outputs = 1u;
     capabilities->maximum_in_flight_jobs = 3u;
+#if defined(ZIPDEPTH_WITH_VULKAN) && defined(__ANDROID__)
+    capabilities->flags |= IBRH_CAP_GPU_RESOURCES |
+        IBRH_CAP_EXTERNAL_SYNCHRONIZATION;
+    capabilities->input_domain_mask |=
+        1ull << IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER;
+    capabilities->synchronization_mask |= 1ull << IBRH_SYNC_SYNC_FD;
+#endif
 #if defined(ZIPDEPTH_WITH_VULKAN) && defined(_WIN32)
     try {
         if (zipdepth_native::probe_external_gpu(0u).available) {
@@ -666,7 +881,9 @@ ibrh_result IBRH_CALL model_plan_outputs(
     if (!input_size(
             copy_string(request->parameters_json), network_size, network_size))
         return IBRH_ERROR_INVALID_ARGUMENT;
-    if (request->inputs[0].domain == IBRH_RESOURCE_DOMAIN_HOST) {
+    if (request->inputs[0].domain == IBRH_RESOURCE_DOMAIN_HOST ||
+        request->inputs[0].domain ==
+            IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER) {
         network_dimensions(
             request->inputs[0].width, request->inputs[0].height, network_size,
             outputs[0].width, outputs[0].height);
@@ -700,7 +917,8 @@ ibrh_result IBRH_CALL submit(
                     "ZipDepth Size must be an integer from 1 to 4096");
     uint32_t expected_width = input.width;
     uint32_t expected_height = input.height;
-    if (input.domain == IBRH_RESOURCE_DOMAIN_HOST)
+    if (input.domain == IBRH_RESOURCE_DOMAIN_HOST ||
+        input.domain == IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER)
         network_dimensions(
             input.width, input.height, network_size,
             expected_width, expected_height);
@@ -768,6 +986,62 @@ ibrh_result IBRH_CALL submit(
             return IBRH_ERROR_INVALID_STATE;
         }
         *output = job; return IBRH_OK;
+    }
+#endif
+#if defined(ZIPDEPTH_WITH_VULKAN) && defined(__ANDROID__)
+    if (input.domain == IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER) {
+        const bool synchronization_valid =
+            source.synchronization.kind == IBRH_SYNC_NONE ||
+            (source.synchronization.kind == IBRH_SYNC_SYNC_FD &&
+             source.synchronization.operation == IBRH_SYNC_WAIT &&
+             source.synchronization.native_handle_type ==
+                 IBRH_NATIVE_HANDLE_POSIX_FD);
+        if (destination.domain != IBRH_RESOURCE_DOMAIN_HOST ||
+            input.native_handle_type !=
+                IBRH_NATIVE_HANDLE_ANDROID_HARDWARE_BUFFER ||
+            destination.native_handle_type !=
+                IBRH_NATIVE_HANDLE_HOST_POINTER ||
+            input.pixel_format != IBRH_PIXEL_RGBA8 ||
+            !synchronization_valid ||
+            target.synchronization.kind != IBRH_SYNC_NONE) {
+            return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
+        }
+        auto* depth = reinterpret_cast<float*>(
+            static_cast<uintptr_t>(destination.native_handle) +
+            destination.byte_offset);
+        auto* job = new (std::nothrow) ibrh_job();
+        if (!job) return IBRH_ERROR_INTERNAL;
+        uint32_t admitted = model->host_admissions->load();
+        while (admitted < 3u &&
+            !model->host_admissions->compare_exchange_weak(
+                admitted, admitted + 1u)) {}
+        if (admitted >= 3u) {
+            delete job;
+            return IBRH_ERROR_INVALID_STATE;
+        }
+        job->gpu_admission = model->host_admissions;
+        job->source_frame_id = request->source_frame_id;
+        job->timestamp_ns = request->timestamp_ns;
+        job->width = destination.width;
+        job->height = destination.height;
+        const int acquire_fence = source.synchronization.kind ==
+            IBRH_SYNC_SYNC_FD
+            ? static_cast<int>(source.synchronization.native_handle) : -1;
+        auto worker = model->host_worker;
+        if (!worker || !worker->enqueue({
+                job, model->context, nullptr, input.width, input.height,
+                input.row_stride_bytes, true, network_size, depth,
+                static_cast<uint32_t>(
+                    destination.row_stride_bytes / sizeof(float)),
+                reinterpret_cast<void*>(
+                    static_cast<uintptr_t>(input.native_handle)),
+                input.auxiliary_handle,
+                acquire_fence})) {
+            delete job;
+            return IBRH_ERROR_INVALID_STATE;
+        }
+        *output = job;
+        return IBRH_OK;
     }
 #endif
     if (input.domain != IBRH_RESOURCE_DOMAIN_HOST ||
