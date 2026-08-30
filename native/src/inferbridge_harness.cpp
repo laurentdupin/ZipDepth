@@ -10,7 +10,6 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
-#include <cerrno>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -26,10 +25,7 @@
 #include <vector>
 
 #if defined(__ANDROID__)
-#include <android/hardware_buffer.h>
 #include <android/log.h>
-#include <poll.h>
-#include <unistd.h>
 #endif
 
 struct ibrh_runtime {
@@ -222,13 +218,6 @@ void network_dimensions(
     };
     width = aligned_size(input_width * scale);
     height = aligned_size(input_height * scale);
-#if defined(__ANDROID__)
-    // Keep the mobile path's vertical detail while limiting the wide-screen
-    // tensor area that dominates compute on the Quest. The preprocessor still
-    // samples the complete source frame and the result maps back over its full UV
-    // range; only the network's internal horizontal representation is compressed.
-    if (width > height) width = aligned_size(height);
-#endif
 }
 
 ibrh_result status_result(zipdepth_status status) {
@@ -303,116 +292,6 @@ public:
     }
 
 private:
-#if defined(__ANDROID__)
-    bool read_android_luma(
-        const Work& work, uint32_t width, uint32_t height,
-        std::vector<uint8_t>& luma) {
-        auto* buffer = static_cast<AHardwareBuffer*>(
-            work.android_hardware_buffer);
-        if (buffer == nullptr) return false;
-        void* address = nullptr;
-        int wait_fence = work.acquire_fence_fd >= 0
-            ? dup(work.acquire_fence_fd) : -1;
-        const int locked = AHardwareBuffer_lock(
-            buffer, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY,
-            wait_fence, nullptr, &address);
-        if (wait_fence >= 0) close(wait_fence);
-        if (locked != 0 || address == nullptr) return false;
-        AHardwareBuffer_Desc description{};
-        AHardwareBuffer_describe(buffer, &description);
-        luma.resize(static_cast<size_t>(width) * height);
-        const auto* source = static_cast<const uint8_t*>(address);
-        const size_t source_stride = static_cast<size_t>(description.stride) * 4u;
-        for (uint32_t y = 0u; y < height; ++y) {
-            const uint32_t source_y = std::min(
-                work.height - 1u, static_cast<uint32_t>(
-                    static_cast<uint64_t>(y) * work.height / height));
-            for (uint32_t x = 0u; x < width; ++x) {
-                const uint32_t source_x = std::min(
-                    work.width - 1u, static_cast<uint32_t>(
-                        static_cast<uint64_t>(x) * work.width / width));
-                const uint8_t* pixel = source +
-                    static_cast<size_t>(source_y) * source_stride +
-                    static_cast<size_t>(source_x) * 4u;
-                luma[static_cast<size_t>(y) * width + x] =
-                    static_cast<uint8_t>((77u * pixel[0] +
-                        150u * pixel[1] + 29u * pixel[2]) >> 8u);
-            }
-        }
-        int release_fence = -1;
-        AHardwareBuffer_unlock(buffer, &release_fence);
-        if (release_fence >= 0) {
-            pollfd descriptor{release_fence, POLLIN, 0};
-            while (poll(&descriptor, 1, -1) < 0 && errno == EINTR) {}
-            close(release_fence);
-        }
-        return true;
-    }
-
-    void temporal_warp(
-        const std::vector<uint8_t>& current_luma,
-        uint32_t width, uint32_t height,
-        std::vector<float>& depth) const {
-        depth.resize(static_cast<size_t>(width) * height);
-        constexpr int block = 16;
-        constexpr int search = 6;
-        constexpr int sample_step = 2;
-        for (int block_y = 0; block_y < static_cast<int>(height);
-                block_y += block) {
-            for (int block_x = 0; block_x < static_cast<int>(width);
-                    block_x += block) {
-                int best_dx = 0;
-                int best_dy = 0;
-                uint64_t best_error = std::numeric_limits<uint64_t>::max();
-                for (int dy = -search; dy <= search; dy += 2) {
-                    for (int dx = -search; dx <= search; dx += 2) {
-                        uint64_t error = 0u;
-                        uint32_t samples = 0u;
-                        for (int y = 0; y < block; y += sample_step) {
-                            const int cy = block_y + y;
-                            const int py = cy + dy;
-                            if (cy >= static_cast<int>(height) || py < 0 ||
-                                py >= static_cast<int>(height)) continue;
-                            for (int x = 0; x < block; x += sample_step) {
-                                const int cx = block_x + x;
-                                const int px = cx + dx;
-                                if (cx >= static_cast<int>(width) || px < 0 ||
-                                    px >= static_cast<int>(width)) continue;
-                                const int difference = static_cast<int>(
-                                    current_luma[static_cast<size_t>(cy) * width + cx]) -
-                                    static_cast<int>(previous_luma_[
-                                        static_cast<size_t>(py) * width + px]);
-                                error += static_cast<uint64_t>(std::abs(difference));
-                                ++samples;
-                            }
-                        }
-                        if (samples != 0u) error = error * 64u / samples;
-                        if (error < best_error) {
-                            best_error = error;
-                            best_dx = dx;
-                            best_dy = dy;
-                        }
-                    }
-                }
-                for (int y = 0; y < block; ++y) {
-                    const int cy = block_y + y;
-                    if (cy >= static_cast<int>(height)) break;
-                    for (int x = 0; x < block; ++x) {
-                        const int cx = block_x + x;
-                        if (cx >= static_cast<int>(width)) break;
-                        const int px = std::clamp(cx + best_dx, 0,
-                            static_cast<int>(width) - 1);
-                        const int py = std::clamp(cy + best_dy, 0,
-                            static_cast<int>(height) - 1);
-                        depth[static_cast<size_t>(cy) * width + cx] =
-                            previous_depth_[static_cast<size_t>(py) * width + px];
-                    }
-                }
-            }
-        }
-    }
-#endif
-
     void execute(const Work& work) {
         uint32_t network_width = 0u;
         uint32_t network_height = 0u;
@@ -423,36 +302,17 @@ private:
             network_height;
 #if defined(__ANDROID__)
         if (work.android_hardware_buffer != nullptr) {
-            std::vector<uint8_t> current_luma;
-            const bool have_luma = read_android_luma(
-                work, network_width, network_height, current_luma);
-            const bool temporal = have_luma &&
-                previous_width_ == network_width &&
-                previous_height_ == network_height &&
-                previous_luma_.size() == static_cast<size_t>(plane) &&
-                previous_depth_.size() == static_cast<size_t>(plane) &&
-                (android_frame_count_ & 1u) != 0u;
             std::vector<float> temporary(static_cast<size_t>(plane));
-            if (temporal) {
-                temporal_warp(
-                    current_luma, network_width, network_height, temporary);
-            } else {
-                const zipdepth_status result =
-                    zipdepth_infer_android_hardware_buffer_vulkan_f32(
-                        work.context, work.android_hardware_buffer,
-                        work.android_hardware_buffer_id,
-                        work.acquire_fence_fd, work.width, work.height,
-                        network_width, network_height, temporary.data(),
-                        temporary.size());
-                if (result != ZIPDEPTH_STATUS_OK) {
-                    throw std::runtime_error(zipdepth_last_error());
-                }
+            const zipdepth_status result =
+                zipdepth_infer_android_hardware_buffer_vulkan_f32(
+                    work.context, work.android_hardware_buffer,
+                    work.android_hardware_buffer_id,
+                    work.acquire_fence_fd, work.width, work.height,
+                    network_width, network_height, temporary.data(),
+                    temporary.size());
+            if (result != ZIPDEPTH_STATUS_OK) {
+                throw std::runtime_error(zipdepth_last_error());
             }
-            ++android_frame_count_;
-            if (have_luma) previous_luma_ = std::move(current_luma);
-            previous_depth_ = temporary;
-            previous_width_ = network_width;
-            previous_height_ = network_height;
             for (uint32_t y = 0; y < network_height; ++y) {
                 std::copy_n(
                     temporary.data() + uint64_t(y) * network_width,
@@ -566,13 +426,6 @@ private:
     std::deque<Work> queue_;
     bool stopping_ = false;
     std::thread thread_;
-#if defined(__ANDROID__)
-    std::vector<uint8_t> previous_luma_;
-    std::vector<float> previous_depth_;
-    uint32_t previous_width_ = 0u;
-    uint32_t previous_height_ = 0u;
-    uint64_t android_frame_count_ = 0u;
-#endif
 };
 
 #if defined(ZIPDEPTH_WITH_VULKAN)

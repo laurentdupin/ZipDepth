@@ -147,38 +147,19 @@ VulkanExecutor::Tensor VulkanExecutor::infer_device(midas_native::VulkanBuffer i
     context_.batch([&]{
         Tensor x{3,height,width,std::move(input)};
         Tensor half=conv_bn(x,"encoder.stem_half",2),q=conv_bn(half,"encoder.stem_quarter",2);
-#if defined(__ANDROID__)
-        Tensor s1=rep(q,"encoder.stage1.0");
-        Tensor s2=rep(s1,"encoder.down2",2);s2=rep(s2,"encoder.stage2.0");
-#else
         Tensor s1=rep(rep(q,"encoder.stage1.0"),"encoder.stage1.1");
         Tensor s2=rep(s1,"encoder.down2",2);s2=rep(rep(s2,"encoder.stage2.0"),"encoder.stage2.1");
-#endif
         Tensor m1=conv(s2,"encoder.stage2.2.branch1.weight",nullptr,1,1,1,s2.channels),m2=conv(s2,"encoder.stage2.2.branch2.weight",nullptr,1,2,2,s2.channels);
         s2=add(s2,bn(add(m1,m2),"encoder.stage2.2.bn",false));
         Tensor stripped=make(s2.channels,s2.height,s2.width);extra_.strip_attention(stripped.buffer,s2.buffer,weight("encoder.stage2.3.gate_conv.0.weight"),weight("encoder.stage2.3.gate_conv.1.weight"),weight("encoder.stage2.3.gate_conv.1.bias"),weight("encoder.stage2.3.gate_conv.1.running_mean"),weight("encoder.stage2.3.gate_conv.1.running_var"),s2.width,s2.height,s2.channels);s2=std::move(stripped);
         Tensor s3=rep(s2,"encoder.down3",2);
-#if defined(__ANDROID__)
-        // Quest's XR renderer and inference share one Adreno GPU. Stage 3 is
-        // six reparameterized residual blocks at the same shape; retain the
-        // final refinement for the low-latency path while
-        // leaving the full-resolution decoder and published depth size intact.
-        s3=rep(s3,"encoder.stage3.5");
-#else
         for(std::uint32_t i=0;i<6;++i)
             s3=rep(s3,"encoder.stage3."+std::to_string(i));
-#endif
-#if !defined(__ANDROID__)
         Tensor avg=make(s3.channels,1,1);extra_.channel_average(avg.buffer,s3.buffer,s3.channels,s3.width*s3.height);
         Tensor ca=conv(avg,"encoder.stage3.6.fc.0.weight",nullptr);Tensor car=make(ca.channels,1,1);operators_.activation(car.buffer,ca.buffer,ca.channels,1);ca=conv(car,"encoder.stage3.6.fc.2.weight",nullptr);Tensor gate=make(ca.channels,1,1);extra_.elementwise(gate.buffer,ca.buffer,ca.buffer,ca.channels,1,4);Tensor weighted=make(s3.channels,s3.height,s3.width);extra_.elementwise(weighted.buffer,s3.buffer,gate.buffer,checked(elements(s3.channels,s3.height,s3.width)),s3.width*s3.height,2);s3=std::move(weighted);
         Tensor logits=conv(s3,"encoder.stage3.7.context_weight.weight","encoder.stage3.7.context_weight.bias");Tensor ctx=make(s3.channels,1,1);extra_.context_reduce(ctx.buffer,s3.buffer,logits.buffer,s3.channels,s3.width*s3.height);ctx=conv(ctx,"encoder.stage3.7.transform.0.weight","encoder.stage3.7.transform.0.bias");ctx=bn(ctx,"encoder.stage3.7.transform.1",true);ctx=conv(ctx,"encoder.stage3.7.transform.3.weight","encoder.stage3.7.transform.3.bias");Tensor broadcast=make(s3.channels,s3.height,s3.width);extra_.elementwise(broadcast.buffer,s3.buffer,ctx.buffer,checked(elements(s3.channels,s3.height,s3.width)),s3.width*s3.height,3);s3=std::move(broadcast);
-#endif
         Tensor s4=rep(s3,"encoder.down4",2);
-#if defined(__ANDROID__)
-        s4=rep(s4,"encoder.stage4.0");
-#else
         s4=rep(rep(s4,"encoder.stage4.0"),"encoder.stage4.1");
-#endif
         Tensor spp=conv_bn(s4,"encoder.spp.cv1"),p1=make(spp.channels,spp.height,spp.width),p2=make(spp.channels,spp.height,spp.width),p3=make(spp.channels,spp.height,spp.width);extra_.maxpool5(p1.buffer,spp.buffer,spp.width,spp.height,spp.channels);extra_.maxpool5(p2.buffer,p1.buffer,p1.width,p1.height,p1.channels);extra_.maxpool5(p3.buffer,p2.buffer,p2.width,p2.height,p2.channels);Tensor joined=make(spp.channels*4,spp.height,spp.width);extra_.concat4(joined.buffer,spp.buffer,p1.buffer,p2.buffer,p3.buffer,checked(elements(spp.channels,spp.height,spp.width)));s4=conv_bn(joined,"encoder.spp.cv2");
         Tensor lth=conv(s4,"encoder.cross_scale.low_to_high.weight",nullptr,1,0,1,4);lth=nearest(lth,s3.width,s3.height);Tensor htl=conv(s3,"encoder.cross_scale.high_to_low.weight",nullptr,1,0,1,4);htl=adaptive(htl,s4.width,s4.height);s3=add(s3,lth,.3f);s4=add(s4,htl,.3f);
         Tensor f4=conv_bn(s4,"decoder.proj4"),f3=fusion(s3,f4,"decoder.fuse3"),f2=fusion(s2,f3,"decoder.fuse2"),f1=fusion(s1,f2,"decoder.fuse1"),fh=fusion(half,f1,"decoder.fuse_half"),depth=conv(fh,"decoder.head_half.weight","decoder.head_half.bias",1,1);

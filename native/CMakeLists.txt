@@ -118,6 +118,14 @@ if(WIN32 AND ZIPDEPTH_WITH_VULKAN)
 endif()
 
 include(CTest)
+if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME zipdepth_android_parity_contract
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/android_parity_contract.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/inferbridge_harness.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_executor.cpp")
+endif()
 add_executable(zipdepth_model_probe tools/model_probe.cpp src/model.cpp)
 target_include_directories(zipdepth_model_probe PRIVATE include src)
 if(MSVC)
