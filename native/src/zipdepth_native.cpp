@@ -8,6 +8,7 @@
 #if defined(ZIPDEPTH_WITH_METAL)
 #include "metal_executor.h"
 #endif
+#include "zipdepth_internal.h"
 
 #include <algorithm>
 #include <memory>
@@ -59,6 +60,46 @@ zipdepth_status protect(Function&& function) {
     }
 }
 }
+
+namespace zipdepth_native {
+
+#if defined(ZIPDEPTH_WITH_METAL)
+class MetalContextExternalGpu final : public ExternalGpu {
+public:
+    explicit MetalContextExternalGpu(zipdepth_context* context)
+        : context_(context) {}
+    ExternalGpuCapabilities capabilities() const override {
+        return {true, 0u, 3u};
+    }
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request) override {
+        if (context_ == nullptr || !context_->metal)
+            throw std::invalid_argument("ZipDepth Metal context is unavailable");
+        return context_->metal->submit_texture(request);
+    }
+    void transfer_counters(std::uint64_t& upload,
+                           std::uint64_t& download) const override {
+        upload = 0u;
+        download = 0u;
+    }
+private:
+    zipdepth_context* context_ = nullptr;
+};
+#endif
+
+std::shared_ptr<ExternalGpu> create_metal_external_gpu(
+    zipdepth_context* context) {
+#if defined(ZIPDEPTH_WITH_METAL)
+    if (context == nullptr || !context->metal)
+        throw std::invalid_argument("ZipDepth Metal context is unavailable");
+    return std::make_shared<MetalContextExternalGpu>(context);
+#else
+    (void)context;
+    throw std::invalid_argument("ZipDepth was built without Metal");
+#endif
+}
+
+}  // namespace zipdepth_native
 
 extern "C" {
 

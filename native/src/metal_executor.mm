@@ -1,4 +1,5 @@
 #include "metal_executor.h"
+#include "inferbridge/native_harness_metal_texture.h"
 #include "model.h"
 
 #include <inferbridge/native_harness_precision.h>
@@ -18,6 +19,22 @@
 
 namespace zipdepth_native {
 namespace {
+
+struct ImageShape { std::uint32_t width, height; };
+
+ImageShape inferbridge_image_shape(
+    std::uint32_t source_width, std::uint32_t source_height,
+    std::uint32_t shorter_side) {
+    if (!source_width || !source_height || !shorter_side)
+        throw std::invalid_argument("invalid ZipDepth network shape");
+    const double scale = static_cast<double>(shorter_side) /
+        std::min(source_width, source_height);
+    const auto align32 = [](double value) {
+        return std::max(32u, static_cast<std::uint32_t>(
+            std::llround(value / 32.0) * 32.0));
+    };
+    return {align32(source_width * scale), align32(source_height * scale)};
+}
 
 MPSShape* shape(std::initializer_list<NSInteger> values) {
     NSMutableArray<NSNumber*>* result =
@@ -48,6 +65,7 @@ public:
     MPSGraph* graph() const { return graph_; }
     MPSGraphTensor* input() const { return input_; }
     NSArray<MPSGraphTensor*>* outputs() const { return @[depth_, auxiliary_]; }
+    MPSGraphTensor* presentation() const { return presentation_; }
     zipdepth_model_kind kind() const { return model_.kind(); }
 
     void build() {
@@ -153,6 +171,81 @@ public:
             auxiliary_ = [graph_ castTensor:auxiliary_
                 toType:MPSDataTypeFloat32 name:nil];
         }
+    }
+
+    void build_presentation() {
+        build();
+        const int low_width = width_ / 2;
+        const int low_height = height_ / 2;
+        MPSGraphTensor* full = nil;
+        if (model_.kind() == ZIPDEPTH_MODEL_BASE_GPU) {
+            MPSGraphTensor* padded = [graph_ padTensor:depth_
+                withPaddingMode:MPSGraphPaddingModeClampToEdge
+                leftPadding:shape({0, 0, 1, 1})
+                rightPadding:shape({0, 0, 1, 1})
+                constantValue:0.0 name:nil];
+            NSMutableArray<MPSGraphTensor*>* neighbors =
+                [NSMutableArray arrayWithCapacity:9];
+            for (int y = 0; y < 3; ++y) {
+                for (int x = 0; x < 3; ++x) {
+                    MPSGraphTensor* tile = [graph_ sliceTensor:padded
+                        dimension:2 start:y length:low_height name:nil];
+                    tile = [graph_ sliceTensor:tile dimension:3
+                        start:x length:low_width name:nil];
+                    [neighbors addObject:tile];
+                }
+            }
+            MPSGraphTensor* samples = [graph_ concatTensors:neighbors
+                dimension:1 name:nil];
+            samples = [graph_ reshapeTensor:samples
+                withShape:shape({1, 1, 9, low_height, low_width}) name:nil];
+            MPSGraphTensor* weights = [graph_ reshapeTensor:auxiliary_
+                withShape:shape({1, 4, 9, low_height, low_width}) name:nil];
+            weights = [graph_ softMaxWithTensor:weights axis:2 name:nil];
+            MPSGraphTensor* pixels = [graph_ reductionSumWithTensor:
+                [graph_ multiplicationWithPrimaryTensor:samples
+                    secondaryTensor:weights name:nil]
+                axis:2 name:nil];
+            full = [graph_ depthToSpace2DTensor:pixels widthAxis:3
+                heightAxis:2 depthAxis:1 blockSize:2
+                usePixelShuffleOrder:YES name:nil];
+        } else {
+            MPSGraphTensor* bilinear = [graph_ resizeTensor:depth_
+                size:shape({height_, width_}) mode:MPSGraphResizeBilinear
+                centerResult:YES alignCorners:NO
+                layout:MPSGraphTensorNamedDataLayoutNCHW name:nil];
+            MPSGraphTensor* nearest = [graph_ resizeTensor:depth_
+                size:shape({height_, width_}) mode:MPSGraphResizeNearest
+                centerResult:YES alignCorners:NO
+                layout:MPSGraphTensorNamedDataLayoutNCHW name:nil];
+            MPSGraphTensor* one = [graph_ constantWithScalar:1.0
+                dataType:MPSDataTypeFloat32];
+            full = [graph_ additionWithPrimaryTensor:
+                [graph_ multiplicationWithPrimaryTensor:auxiliary_
+                    secondaryTensor:nearest name:nil]
+                secondaryTensor:[graph_ multiplicationWithPrimaryTensor:
+                    [graph_ subtractionWithPrimaryTensor:one
+                        secondaryTensor:auxiliary_ name:nil]
+                    secondaryTensor:bilinear name:nil] name:nil];
+        }
+        MPSGraphTensor* zero = [graph_ constantWithScalar:0.0
+            dataType:MPSDataTypeFloat32];
+        full = [graph_ maximumWithPrimaryTensor:full
+            secondaryTensor:zero name:nil];
+        NSArray<NSNumber*>* axes = @[@0, @1, @2, @3];
+        MPSGraphTensor* minimum = [graph_ reductionMinimumWithTensor:full
+            axes:axes name:nil];
+        MPSGraphTensor* maximum = [graph_ reductionMaximumWithTensor:full
+            axes:axes name:nil];
+        MPSGraphTensor* span = [graph_ maximumWithPrimaryTensor:
+            [graph_ subtractionWithPrimaryTensor:maximum
+                secondaryTensor:minimum name:nil]
+            secondaryTensor:[graph_ constantWithScalar:1.0e-8
+                dataType:MPSDataTypeFloat32] name:nil];
+        presentation_ = [graph_ divisionWithPrimaryTensor:
+            [graph_ subtractionWithPrimaryTensor:full
+                secondaryTensor:minimum name:nil]
+            secondaryTensor:span name:@"normalized_inverse_depth"];
     }
 
 private:
@@ -294,12 +387,28 @@ private:
     MPSGraphTensor* input_ = nil;
     MPSGraphTensor* depth_ = nil;
     MPSGraphTensor* auxiliary_ = nil;
+    MPSGraphTensor* presentation_ = nil;
 };
 
 struct Plan {
     MPSGraph* graph = nil;
     MPSGraphTensor* input = nil;
     MPSGraphExecutable* executable = nil;
+};
+
+class MetalExternalJob final : public ExternalJob {
+public:
+    explicit MetalExternalJob(
+        std::shared_ptr<inferbridge::native_harness::metal::Submission> value)
+        : submission_(std::move(value)) {}
+    ExternalJobState state() const override {
+        if (submission_->cancelled()) return ExternalJobState::cancelled;
+        return submission_->complete() ? ExternalJobState::complete :
+            ExternalJobState::running;
+    }
+    void cancel() override { submission_->cancel(); }
+private:
+    std::shared_ptr<inferbridge::native_harness::metal::Submission> submission_;
 };
 
 }  // namespace
@@ -317,6 +426,56 @@ public:
             throw std::invalid_argument("ZipDepth Metal does not support INT8");
         fp16_ = precision == inferbridge::native::Precision::fp16 ||
             precision == inferbridge::native::Precision::automatic;
+        texture_pipeline_ = std::make_unique<
+            inferbridge::native_harness::metal::TexturePipeline>(device_);
+    }
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request) {
+        const ImageShape network = inferbridge_image_shape(
+            request.width, request.height, request.input_size);
+        const float mean[3] = {0.0f, 0.0f, 0.0f};
+        const float deviation[3] = {1.0f, 1.0f, 1.0f};
+        inferbridge::native_harness::metal::Request texture_request;
+        texture_request.input_texture = request.shared_texture_handle;
+        texture_request.input_width = request.width;
+        texture_request.input_height = request.height;
+        texture_request.input_format = request.rgba ?
+            inferbridge::native_harness::metal::PixelFormat::rgba8 :
+            inferbridge::native_harness::metal::PixelFormat::bgra8;
+        texture_request.wait_event = request.wait_fence_handle;
+        texture_request.wait_value = request.wait_fence_value;
+        texture_request.output_texture = request.output_texture_handle;
+        texture_request.output_width = request.output_width;
+        texture_request.output_height = request.output_height;
+        texture_request.signal_event = request.signal_fence_handle;
+        texture_request.signal_value = request.signal_fence_value;
+        std::lock_guard<std::mutex> lock(mutex_);
+        @autoreleasepool {
+            auto prepared = texture_pipeline_->prepare(texture_request,
+                network.width, network.height, mean, deviation);
+            Plan& plan = get_presentation_plan(network.width, network.height);
+            prepared.input_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:prepared.input_buffer
+                shape:shape({1, 3, network.height, network.width})
+                dataType:MPSDataTypeFloat32];
+            prepared.output_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:prepared.output_buffer
+                shape:shape({1, 1, network.height, network.width})
+                dataType:MPSDataTypeFloat32];
+            MPSGraphExecutableExecutionDescriptor* descriptor =
+                [MPSGraphExecutableExecutionDescriptor new];
+            descriptor.waitUntilCompleted = NO;
+            NSArray<MPSGraphTensorData*>* results = [plan.executable
+                runAsyncWithMTLCommandQueue:texture_pipeline_->queue()
+                inputsArray:@[prepared.input_data]
+                resultsArray:@[prepared.output_data]
+                executionDescriptor:descriptor];
+            if (results.count != 1u)
+                throw std::runtime_error("ZipDepth Metal output binding failed");
+            return std::make_shared<MetalExternalJob>(
+                texture_pipeline_->finish(prepared,
+                    network.width, network.height));
+        }
     }
     void infer(const float* rgb, std::uint32_t width, std::uint32_t height,
                float* output, std::uint64_t elements) {
@@ -427,6 +586,32 @@ private:
         return plans_.emplace(key,
             Plan{builder.graph(), builder.input(), executable}).first->second;
     }
+    Plan& get_presentation_plan(int width, int height) {
+        const std::uint64_t key = (1ull << 63u) |
+            (static_cast<std::uint64_t>(width) << 32u) |
+            static_cast<std::uint32_t>(height);
+        auto found = plans_.find(key);
+        if (found != plans_.end()) return found->second;
+        GraphBuilder builder(model_, width, height, fp16_);
+        builder.build_presentation();
+        MPSGraphShapedType* type = [[MPSGraphShapedType alloc]
+            initWithShape:shape({1, 3, height, width})
+            dataType:MPSDataTypeFloat32];
+        MPSGraphCompilationDescriptor* descriptor =
+            [MPSGraphCompilationDescriptor new];
+        descriptor.optimizationLevel = MPSGraphOptimizationLevel1;
+        descriptor.waitForCompilationCompletion = YES;
+        MPSGraphExecutable* executable = [builder.graph()
+            compileWithDevice:graph_device_ feeds:@{builder.input(): type}
+            targetTensors:@[builder.presentation()] targetOperations:nil
+            compilationDescriptor:descriptor];
+        if (executable == nil)
+            throw std::runtime_error(
+                "failed to compile ZipDepth Metal presentation graph");
+        executable.options = MPSGraphOptionsSynchronizeResults;
+        return plans_.emplace(key,
+            Plan{builder.graph(), builder.input(), executable}).first->second;
+    }
     ModelFile model_;
     bool fp16_ = false;
     id<MTLDevice> device_ = nil;
@@ -434,6 +619,8 @@ private:
     MPSGraphDevice* graph_device_ = nil;
     std::unordered_map<std::uint64_t, Plan> plans_;
     std::mutex mutex_;
+    std::unique_ptr<inferbridge::native_harness::metal::TexturePipeline>
+        texture_pipeline_;
 };
 
 MetalExecutor::MetalExecutor(const std::string& path)
@@ -443,6 +630,11 @@ void MetalExecutor::infer(const float* rgb, std::uint32_t width,
                           std::uint32_t height, float* depth,
                           std::uint64_t elements) {
     impl_->infer(rgb, width, height, depth, elements);
+}
+
+std::shared_ptr<ExternalJob> MetalExecutor::submit_texture(
+    const ExternalTextureRequest& request) {
+    return impl_->submit_texture(request);
 }
 
 }  // namespace zipdepth_native

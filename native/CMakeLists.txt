@@ -87,6 +87,8 @@ if(ZIPDEPTH_WITH_METAL)
         message(FATAL_ERROR "ZIPDEPTH_WITH_METAL requires an Apple platform")
     endif()
     target_sources(zipdepth_native PRIVATE src/metal_executor.mm)
+    set_source_files_properties(src/metal_executor.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
     target_compile_definitions(zipdepth_native PRIVATE ZIPDEPTH_WITH_METAL=1)
     target_link_libraries(zipdepth_native PRIVATE
         "-framework Foundation" "-framework Metal"

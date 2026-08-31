@@ -3,8 +3,9 @@
 
 #include "zipdepth_native.h"
 #include "inferbridge/native_harness_precision.h"
-#if defined(ZIPDEPTH_WITH_VULKAN)
 #include "external_gpu.h"
+#if defined(ZIPDEPTH_WITH_METAL)
+#include "zipdepth_internal.h"
 #endif
 
 #include <atomic>
@@ -66,7 +67,7 @@ struct ibrh_model {
     ibrh_runtime* runtime = nullptr;
     zipdepth_context* context = nullptr;
     std::string model_path;
-#if defined(ZIPDEPTH_WITH_VULKAN)
+#if defined(ZIPDEPTH_WITH_VULKAN) || defined(ZIPDEPTH_WITH_METAL)
     std::shared_ptr<zipdepth_native::ExternalGpu> external_gpu;
     std::shared_ptr<ZipDepthGpuWorker> gpu_worker;
     std::shared_ptr<std::atomic<uint32_t>> gpu_admissions =
@@ -83,7 +84,7 @@ struct ibrh_job {
     std::atomic<uint32_t> references{1u};
     std::atomic<uint32_t> state{IBRH_JOB_QUEUED};
     std::atomic<bool> cancel_requested{false};
-#if defined(ZIPDEPTH_WITH_VULKAN)
+#if defined(ZIPDEPTH_WITH_VULKAN) || defined(ZIPDEPTH_WITH_METAL)
     mutable std::mutex gpu_mutex;
     std::shared_ptr<zipdepth_native::ExternalJob> gpu_job;
 #endif
@@ -104,7 +105,7 @@ namespace {
 
 thread_local std::string g_last_error;
 constexpr char kHarnessId[] = "inferbridge.zipdepth.native";
-constexpr char kHarnessVersion[] = "1.1.0";
+constexpr char kHarnessVersion[] = "1.2.0";
 
 
 ibrh_result fail(
@@ -580,7 +581,7 @@ private:
 #endif
 };
 
-#if defined(ZIPDEPTH_WITH_VULKAN)
+#if defined(ZIPDEPTH_WITH_VULKAN) || defined(ZIPDEPTH_WITH_METAL)
 class ZipDepthGpuWorker final {
 public:
     explicit ZipDepthGpuWorker(
@@ -704,6 +705,15 @@ ibrh_result IBRH_CALL query_capabilities(
         }
     } catch (...) {
     }
+#elif defined(ZIPDEPTH_WITH_METAL) && defined(__APPLE__)
+    capabilities->flags |= IBRH_CAP_GPU_RESOURCES |
+        IBRH_CAP_EXTERNAL_SYNCHRONIZATION | IBRH_CAP_GPU_RESIDENT_OUTPUT;
+    capabilities->input_domain_mask |=
+        1ull << IBRH_RESOURCE_DOMAIN_METAL;
+    capabilities->output_domain_mask |=
+        1ull << IBRH_RESOURCE_DOMAIN_METAL;
+    capabilities->synchronization_mask =
+        1ull << IBRH_SYNC_METAL_SHARED_EVENT;
 #endif
     capabilities->harness_id = {kHarnessId, sizeof(kHarnessId) - 1u};
     capabilities->harness_version = {
@@ -829,6 +839,12 @@ ibrh_result IBRH_CALL model_load(
             return fail(runtime, status_result(status), message);
         }
         model->host_worker = std::make_shared<ZipDepthHostWorker>();
+#if defined(ZIPDEPTH_WITH_METAL) && defined(__APPLE__)
+        model->external_gpu = zipdepth_native::create_metal_external_gpu(
+            model->context);
+        model->gpu_worker = std::make_shared<ZipDepthGpuWorker>(
+            model->external_gpu);
+#endif
     }
     *output = model;
     return IBRH_OK;
@@ -837,7 +853,7 @@ ibrh_result IBRH_CALL model_load(
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
     model->host_worker.reset();
-#if defined(ZIPDEPTH_WITH_VULKAN)
+#if defined(ZIPDEPTH_WITH_VULKAN) || defined(ZIPDEPTH_WITH_METAL)
     model->gpu_worker.reset();
     model->external_gpu.reset();
 #endif
@@ -982,6 +998,63 @@ ibrh_result IBRH_CALL submit(
         *output = job; return IBRH_OK;
     }
 #endif
+#if defined(ZIPDEPTH_WITH_METAL) && defined(__APPLE__)
+    if (input.domain == IBRH_RESOURCE_DOMAIN_METAL) {
+        const auto& wait = source.synchronization;
+        const auto& signal = target.synchronization;
+        const bool no_wait = wait.kind == IBRH_SYNC_NONE &&
+            wait.native_handle == 0u;
+        const bool event_wait = wait.kind == IBRH_SYNC_METAL_SHARED_EVENT &&
+            wait.operation == IBRH_SYNC_WAIT &&
+            wait.native_handle_type == IBRH_NATIVE_HANDLE_METAL_SHARED_EVENT &&
+            wait.native_handle != 0u;
+        if (!model->external_gpu ||
+            destination.domain != IBRH_RESOURCE_DOMAIN_METAL ||
+            (input.pixel_format != IBRH_PIXEL_BGRA8 &&
+             input.pixel_format != IBRH_PIXEL_RGBA8) ||
+            input.native_handle_type != IBRH_NATIVE_HANDLE_METAL_TEXTURE ||
+            input.native_handle == 0u ||
+            destination.native_handle_type != IBRH_NATIVE_HANDLE_METAL_TEXTURE ||
+            destination.native_handle == 0u || (!no_wait && !event_wait) ||
+            signal.kind != IBRH_SYNC_METAL_SHARED_EVENT ||
+            signal.operation != IBRH_SYNC_SIGNAL ||
+            signal.native_handle_type != IBRH_NATIVE_HANDLE_METAL_SHARED_EVENT ||
+            signal.native_handle == 0u || signal.value == 0u)
+            return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
+        auto* job = new (std::nothrow) ibrh_job();
+        if (!job) return IBRH_ERROR_INTERNAL;
+        uint32_t admitted = model->gpu_admissions->load();
+        while (admitted < 3u &&
+               !model->gpu_admissions->compare_exchange_weak(
+                   admitted, admitted + 1u)) {}
+        if (admitted >= 3u) {
+            delete job;
+            return IBRH_ERROR_INVALID_STATE;
+        }
+        job->gpu_admission = model->gpu_admissions;
+        const zipdepth_native::ExternalTextureRequest gpu_request{
+            static_cast<uintptr_t>(input.native_handle), input.auxiliary_handle,
+            input.width, input.height,
+            input.pixel_format == IBRH_PIXEL_RGBA8, network_size,
+            static_cast<uintptr_t>(wait.native_handle), wait.value,
+            static_cast<uintptr_t>(destination.native_handle),
+            destination.auxiliary_handle, destination.width, destination.height,
+            static_cast<uintptr_t>(signal.native_handle), signal.value,
+            request->source_frame_id, request->timestamp_ns};
+        job->source_frame_id = request->source_frame_id;
+        job->timestamp_ns = request->timestamp_ns;
+        job->width = input.width;
+        job->height = input.height;
+        job->gpu_backed = true;
+        if (!model->gpu_worker ||
+            !model->gpu_worker->enqueue(job, gpu_request)) {
+            delete job;
+            return IBRH_ERROR_INVALID_STATE;
+        }
+        *output = job;
+        return IBRH_OK;
+    }
+#endif
 #if defined(ZIPDEPTH_WITH_VULKAN) && defined(__ANDROID__)
     if (input.domain == IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER) {
         const bool synchronization_valid =
@@ -1102,7 +1175,7 @@ ibrh_result IBRH_CALL job_poll(
     *status = {};
     status->struct_size = sizeof(*status);
     status->state = job->state.load();
-#if defined(ZIPDEPTH_WITH_VULKAN)
+#if defined(ZIPDEPTH_WITH_VULKAN) || defined(ZIPDEPTH_WITH_METAL)
     if (job->gpu_backed && (job->state.load() == IBRH_JOB_FAILED ||
         job->state.load() == IBRH_JOB_CANCELLED)) {
         status->state = job->state.load();
@@ -1130,7 +1203,7 @@ ibrh_result IBRH_CALL job_poll(
 
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (job == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
-#if defined(ZIPDEPTH_WITH_VULKAN)
+#if defined(ZIPDEPTH_WITH_VULKAN) || defined(ZIPDEPTH_WITH_METAL)
     if (job->gpu_backed) {
         job->state.store(IBRH_JOB_CANCELLED);
         std::lock_guard<std::mutex> lock(job->gpu_mutex);
