@@ -55,6 +55,9 @@ ZIPDEPTH_API zipdepth_status ZIPDEPTH_CALL zipdepth_create_vulkan(
     const char* model_path_utf8,
     uint32_t device_index,
     zipdepth_context** out_context);
+ZIPDEPTH_API zipdepth_status ZIPDEPTH_CALL zipdepth_create_metal(
+    const char* model_path_utf8,
+    zipdepth_context** out_context);
 ZIPDEPTH_API void ZIPDEPTH_CALL zipdepth_destroy(zipdepth_context* context);
 ZIPDEPTH_API zipdepth_status ZIPDEPTH_CALL zipdepth_infer_rgb_f32(
     zipdepth_context* context,
@@ -66,6 +69,13 @@ ZIPDEPTH_API zipdepth_status ZIPDEPTH_CALL zipdepth_infer_rgb_f32(
 ZIPDEPTH_API zipdepth_status ZIPDEPTH_CALL zipdepth_infer_tensor_vulkan_f32(
     zipdepth_context* context,
     const float* normalized_rgb_chw,
+    uint32_t width,
+    uint32_t height,
+    float* depth_hw,
+    uint64_t depth_elements);
+ZIPDEPTH_API zipdepth_status ZIPDEPTH_CALL zipdepth_infer_tensor_metal_f32(
+    zipdepth_context* context,
+    const float* rgb_chw,
     uint32_t width,
     uint32_t height,
     float* depth_hw,

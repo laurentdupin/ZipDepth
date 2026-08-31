@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(ZIPDEPTH_WITH_VULKAN "Build the Vulkan executor" ON)
+option(ZIPDEPTH_WITH_METAL "Build the Apple Metal/MPSGraph executor" ${APPLE})
 
 if(ZIPDEPTH_WITH_VULKAN)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
@@ -81,6 +82,18 @@ add_library(zipdepth_native SHARED
     src/inferbridge_harness.cpp
     src/cpu_executor.cpp
     src/model.cpp)
+if(ZIPDEPTH_WITH_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "ZIPDEPTH_WITH_METAL requires an Apple platform")
+    endif()
+    target_sources(zipdepth_native PRIVATE src/metal_executor.mm)
+    set_source_files_properties(src/metal_executor.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+    target_compile_definitions(zipdepth_native PRIVATE ZIPDEPTH_WITH_METAL=1)
+    target_link_libraries(zipdepth_native PRIVATE
+        "-framework Foundation" "-framework Metal"
+        "-framework MetalPerformanceShadersGraph")
+endif()
 target_include_directories(zipdepth_native PUBLIC include PRIVATE src)
 target_compile_definitions(zipdepth_native PRIVATE
     ZIPDEPTH_BUILD_DLL INFERBRIDGE_HARNESS_BUILDING_LIBRARY)
@@ -125,6 +138,13 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/android_parity_contract.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/inferbridge_harness.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_executor.cpp")
+endif()
+if(BUILD_TESTING AND APPLE AND ZIPDEPTH_WITH_METAL)
+    add_executable(zipdepth_metal_full_graph tests/metal_full_graph.cpp)
+    target_include_directories(zipdepth_metal_full_graph PRIVATE include)
+    target_link_libraries(zipdepth_metal_full_graph PRIVATE zipdepth_native)
+    add_test(NAME zipdepth_metal_full_graph COMMAND zipdepth_metal_full_graph)
+    set_tests_properties(zipdepth_metal_full_graph PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 add_executable(zipdepth_model_probe tools/model_probe.cpp src/model.cpp)
 target_include_directories(zipdepth_model_probe PRIVATE include src)
