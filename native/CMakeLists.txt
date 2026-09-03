@@ -51,6 +51,8 @@ if(ZIPDEPTH_WITH_VULKAN)
     zipdepth_compile_shader(conv2d_spatial4 conv2d_spatial4 -DNO_BATCH_NORM=1)
     zipdepth_compile_shader(conv2d_spatial4_tiled conv2d_spatial4_tiled
         -DNO_BATCH_NORM=1 -DLOCAL_X=16 -DLOCAL_Y=4)
+    zipdepth_compile_shader(conv2d_spatial4_stride2_tiled conv2d_spatial4_tiled
+        -DNO_BATCH_NORM=1 -DLOCAL_X=16 -DLOCAL_Y=4 -DSAMPLE_STRIDE=2)
     zipdepth_compile_shader(conv2d_spatial4_tiled_small conv2d_spatial4_tiled
         -DNO_BATCH_NORM=1 -DLOCAL_X=8 -DLOCAL_Y=4)
     zipdepth_compile_shader(conv2d_spatial4_tiled_relu conv2d_spatial4_tiled
@@ -60,6 +62,7 @@ if(ZIPDEPTH_WITH_VULKAN)
     zipdepth_compile_shader(precision_pointwise_fp16_weights)
     zipdepth_compile_shader(precision_pointwise_int8)
     zipdepth_compile_shader(quantize_rows_int8)
+    zipdepth_compile_shader(precision_spatial_fp16)
     zipdepth_compile_shader(precision_spatial_int8)
     foreach(SHARED_SHADER reduce_absmax quantize_nchw_int8 conv2d_spatial_int8)
         inferbridge_compile_native_support_shader(

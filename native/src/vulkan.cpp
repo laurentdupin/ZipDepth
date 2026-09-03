@@ -231,6 +231,7 @@ VulkanContext::VulkanContext(
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(physical_device_, &properties);
     device_name_ = properties.deviceName;
+    device_type_ = properties.deviceType;
     VkPhysicalDeviceSubgroupSizeControlProperties subgroup_control{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES,
     };
@@ -667,10 +668,17 @@ void VulkanContext::release() noexcept {
 
 void VulkanContext::record_profile(
     const VulkanPipeline& pipeline,
+    std::uint32_t group_x,
+    std::uint32_t group_y,
+    std::uint32_t group_z,
     std::uint64_t ticks) {
-    const std::string& name = pipeline.debug_name_.empty()
+    const std::string base_name = pipeline.debug_name_.empty()
         ? std::string("unnamed")
         : pipeline.debug_name_;
+    const std::string name = base_name + "[" +
+        std::to_string(group_x) + "x" +
+        std::to_string(group_y) + "x" +
+        std::to_string(group_z) + "]";
     ProfileStat& stat = profile_stats_[name];
     stat.total_ticks += ticks;
     stat.maximum_ticks = std::max(stat.maximum_ticks, ticks);
@@ -690,7 +698,7 @@ void VulkanContext::print_profile() const noexcept {
         });
     std::fprintf(
         stderr,
-        "DAD Vulkan profile: %s (GPU timestamps)\n",
+        "ZipDepth Vulkan profile: %s (GPU timestamps)\n",
         device_name_.c_str());
     for (const auto& [name, stat] : sorted) {
         const double total_ms =
@@ -2333,7 +2341,8 @@ void VulkanContext::dispatch_resources(
                         VK_QUERY_RESULT_WAIT_BIT),
                 "vkGetQueryPoolResults");
             record_profile(
-                pipeline, timestamps[1] - timestamps[0]);
+                pipeline, group_x, group_y, group_z,
+                timestamps[1] - timestamps[0]);
         }
         pipeline.cached_descriptor_sets_.push_back(descriptor_set);
     }

@@ -33,6 +33,13 @@ struct Parameters {
     std::uint32_t output_channels;
 };
 
+struct BiasParameters {
+    std::uint32_t spatial;
+    std::uint32_t input_channels;
+    std::uint32_t output_channels;
+    std::uint32_t has_bias;
+};
+
 std::uint32_t divide_up(std::uint32_t value, std::uint32_t divisor) {
     return (value + divisor - 1u) / divisor;
 }
@@ -133,11 +140,12 @@ ErrorMetrics sampled_error(
     return result;
 }
 
+template <typename Parameter>
 double benchmark(
     midas_native::VulkanContext& context,
     const midas_native::VulkanPipeline& pipeline,
     const std::vector<const midas_native::VulkanBuffer*>& buffers,
-    const Parameters& parameters) {
+    const Parameter& parameters) {
     const auto run = [&] {
         context.dispatch(
             pipeline, buffers, &parameters, sizeof(parameters),
@@ -244,14 +252,38 @@ int main(int argc, char** argv) {
 
             auto fp16_weight_output = context.create_device_buffer(
                 output.size() * sizeof(float));
+            std::vector<float> input_nchw(input.size());
+            for (std::uint32_t position = 0; position < kSpatial; ++position)
+                for (std::uint32_t channel = 0;
+                     channel < kInputChannels; ++channel)
+                    input_nchw[channel * kSpatial + position] =
+                        input[position * kInputChannels + channel];
+            auto fp16_weight_input = context.create_device_buffer(
+                input_nchw.size() * sizeof(float));
+            context.upload(fp16_weight_input, input_nchw.data(),
+                input_nchw.size() * sizeof(float));
+            std::vector<float> zero_bias(kOutputChannels, 0.0f);
+            auto fp16_weight_bias = context.create_device_buffer(
+                zero_bias.size() * sizeof(float));
+            context.upload(fp16_weight_bias, zero_bias.data(),
+                zero_bias.size() * sizeof(float));
             auto fp16_weight_pipeline = context.create_pipeline(
                 midas_precision_pointwise_fp16_weights_spv,
-                midas_precision_pointwise_fp16_weights_spv_size, 3u,
-                sizeof(Parameters));
+                midas_precision_pointwise_fp16_weights_spv_size, 4u,
+                sizeof(BiasParameters));
+            const BiasParameters bias_parameters{
+                kSpatial, kInputChannels, kOutputChannels, 0u};
             fp16_weight_ms = benchmark(context, fp16_weight_pipeline,
-                {&fp16_weight_output, &fp32_input, &fp16_weight}, parameters);
-            context.download(fp16_weight_output, output.data(),
-                output.size() * sizeof(float));
+                {&fp16_weight_output, &fp16_weight_input, &fp16_weight,
+                 &fp16_weight_bias}, bias_parameters);
+            std::vector<float> output_nchw(output.size());
+            context.download(fp16_weight_output, output_nchw.data(),
+                output_nchw.size() * sizeof(float));
+            for (std::uint32_t position = 0; position < kSpatial; ++position)
+                for (std::uint32_t channel = 0;
+                     channel < kOutputChannels; ++channel)
+                    output[position * kOutputChannels + channel] =
+                        output_nchw[channel * kSpatial + position];
             print_result("fp16_weight", fp16_weight_ms,
                 sampled_error(output, input, weight));
         } else {

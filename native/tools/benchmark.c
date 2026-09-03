@@ -32,10 +32,19 @@ static int parse_u32(const char* text, uint32_t* value) {
     return 1;
 }
 
+static int parse_device(const char* text, uint32_t* value) {
+    char* end = NULL;
+    const unsigned long parsed = strtoul(text, &end, 10);
+    if (text == end || *end != '\0' || parsed > UINT32_MAX) return 0;
+    *value = (uint32_t)parsed;
+    return 1;
+}
+
 int main(int argc, char** argv) {
-    if (argc != 6) {
+    if (argc != 6 && argc != 7) {
         fprintf(stderr,
-            "usage: %s MODEL WIDTH HEIGHT WARMUP ITERATIONS\n", argv[0]);
+            "usage: %s MODEL WIDTH HEIGHT WARMUP ITERATIONS [DEVICE]\n",
+            argv[0]);
         return 2;
     }
     uint32_t width = 0, height = 0, warmup = 0, iterations = 0;
@@ -55,7 +64,12 @@ int main(int argc, char** argv) {
 
     zipdepth_context* context = NULL;
     const double load_begin = now_ms();
-    zipdepth_status status = zipdepth_create_vulkan(argv[1], 0u, &context);
+    uint32_t device = 0;
+    if (argc == 7 && !parse_device(argv[6], &device)) {
+        fprintf(stderr, "device must be a non-negative integer\n");
+        return 2;
+    }
+    zipdepth_status status = zipdepth_create_vulkan(argv[1], device, &context);
     const double load_ms = now_ms() - load_begin;
     if (status != ZIPDEPTH_STATUS_OK) {
         fprintf(stderr, "load failed: %s\n", zipdepth_last_error());

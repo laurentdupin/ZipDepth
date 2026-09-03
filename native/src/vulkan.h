@@ -188,6 +188,9 @@ public:
     bool supports_packed_int8_dot() const {
         return packed_int8_dot_supported_;
     }
+    bool is_discrete_gpu() const {
+        return device_type_ == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    }
     const VulkanExternalCapabilities& external_capabilities() const {
         return external_capabilities_;
     }
@@ -405,6 +408,9 @@ private:
     void release() noexcept;
     void record_profile(
         const VulkanPipeline& pipeline,
+        std::uint32_t group_x,
+        std::uint32_t group_y,
+        std::uint32_t group_z,
         std::uint64_t ticks);
     void print_profile() const noexcept;
 
@@ -428,6 +434,7 @@ private:
     bool subgroup_size_forced_ = false;
     bool float16_supported_ = false;
     bool packed_int8_dot_supported_ = false;
+    VkPhysicalDeviceType device_type_ = VK_PHYSICAL_DEVICE_TYPE_OTHER;
     float timestamp_period_ns_ = 0.0f;
     std::unordered_map<std::string, ProfileStat> profile_stats_;
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;

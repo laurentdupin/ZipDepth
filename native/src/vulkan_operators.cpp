@@ -11,10 +11,12 @@
 #include "conv2d_depthwise3_spv.h"
 #include "conv2d_spatial4_spv.h"
 #include "conv2d_spatial4_tiled_spv.h"
+#include "conv2d_spatial4_stride2_tiled_spv.h"
 #include "conv2d_spatial4_tiled_small_spv.h"
 #include "conv2d_spatial4_tiled_relu_spv.h"
 
 #include <stdexcept>
+#include <cstdlib>
 #include <vector>
 
 namespace midas_native {
@@ -22,6 +24,11 @@ namespace {
 
 std::uint32_t divide_up(std::uint32_t value, std::uint32_t divisor) {
     return (value + divisor - 1) / divisor;
+}
+
+bool environment_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
 }  // namespace
@@ -63,6 +70,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           midas_conv2d_spatial4_tiled_spv_size,
           4,
           68)),
+      conv_spatial4_stride2_tiled_(context.create_pipeline(
+          midas_conv2d_spatial4_stride2_tiled_spv,
+          midas_conv2d_spatial4_stride2_tiled_spv_size,
+          4,
+          68)),
       conv_spatial4_tiled_small_(context.create_pipeline(
           midas_conv2d_spatial4_tiled_small_spv,
           midas_conv2d_spatial4_tiled_small_spv_size,
@@ -92,7 +104,10 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           midas_bilinear_spv,
           midas_bilinear_spv_size,
           2,
-          24)) {
+          24)),
+      enable_spatial_stride2_tiled_((context.is_discrete_gpu() ||
+          environment_enabled("ZIPDEPTH_ENABLE_SPATIAL_STRIDE2_TILED")) &&
+          !environment_enabled("ZIPDEPTH_DISABLE_SPATIAL_STRIDE2_TILED")) {
     conv_.set_debug_name("midas_conv2d_grouped");
     conv_pointwise4_.set_debug_name("midas_conv2d_pointwise4");
     conv_pointwise_gemm_.set_debug_name("midas_conv2d_pointwise_gemm");
@@ -102,6 +117,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv_spatial4_.set_debug_name("midas_conv2d_spatial4");
     conv_spatial4_tiled_.set_debug_name(
         "midas_conv2d_spatial4_tiled");
+    conv_spatial4_stride2_tiled_.set_debug_name(
+        "midas_conv2d_spatial4_stride2_tiled");
     conv_spatial4_tiled_small_.set_debug_name(
         "midas_conv2d_spatial4_tiled_small");
     conv_spatial4_tiled_relu_.set_debug_name(
@@ -179,6 +196,9 @@ void VulkanOperators::conv(
         spatial4 && stride == 1 && padding_top == 1 &&
         padding_left == 1 && input_width == output_width &&
         input_height == output_height;
+    const bool spatial4_stride2_tiled = spatial4 &&
+        enable_spatial_stride2_tiled_ && stride == 2 &&
+        padding_top == 1 && padding_left == 1;
     const bool spatial4_tiled_small =
         spatial4_tiled && !relu_input &&
         output_width <= 8 && output_height <= 4;
@@ -203,14 +223,16 @@ void VulkanOperators::conv(
                 : conv_pointwise4_)
             :
         (depthwise ? conv_depthwise3_ :
-        (spatial4_tiled
+        (spatial4_stride2_tiled
+            ? conv_spatial4_stride2_tiled_
+            : (spatial4_tiled
             ? (spatial4_tiled_small
                 ? conv_spatial4_tiled_small_
                 : (relu_input
                 ? conv_spatial4_tiled_relu_
                 : conv_spatial4_tiled_))
             :
-        (spatial4 ? conv_spatial4_ : conv_)));
+        (spatial4 ? conv_spatial4_ : conv_))));
     std::vector<const VulkanBuffer*> resources{
         &output, &input, &weight, &bias};
     if (residual != nullptr) {
@@ -224,16 +246,19 @@ void VulkanOperators::conv(
         pointwise_residual
             ? divide_up(output_width * output_height, 64)
             : divide_up(output_width,
-                spatial4_tiled && !spatial4_tiled_small ? 16 : 8),
+                (spatial4_tiled && !spatial4_tiled_small) ||
+                    spatial4_stride2_tiled ? 16 : 8),
         pointwise_residual
             ? divide_up(output_channels, 64)
-            : divide_up(output_height, spatial4_tiled ? 4 : 8),
+            : divide_up(output_height,
+                spatial4_tiled || spatial4_stride2_tiled ? 4 : 8),
         pointwise_residual
             ? 1
             : pointwise
             ? divide_up(output_channels, 4)
             : (spatial4
-                ? divide_up(output_channels, spatial4_tiled ? 8 : 4)
+                ? divide_up(output_channels,
+                    spatial4_tiled || spatial4_stride2_tiled ? 8 : 4)
                 : output_channels));
 }
 
