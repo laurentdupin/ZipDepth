@@ -13,7 +13,9 @@
 #define TILE_HEIGHT (LOCAL_Y * SAMPLE_STRIDE + 2)
 #define TILE_AREA (TILE_WIDTH * TILE_HEIGHT)
 #define INPUT_CHANNEL_TILE 8
+#ifndef OUTPUT_CHANNEL_TILE
 #define OUTPUT_CHANNEL_TILE 8
+#endif
 #define KERNEL_AREA 9
 
 layout(local_size_x = LOCAL_X, local_size_y = LOCAL_Y,

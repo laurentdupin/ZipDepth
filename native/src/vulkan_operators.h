@@ -75,6 +75,7 @@ private:
     VulkanPipeline conv_depthwise3_;
     VulkanPipeline conv_spatial4_;
     VulkanPipeline conv_spatial4_tiled_;
+    VulkanPipeline conv_spatial4_tiled_oc4_;
     VulkanPipeline conv_spatial4_stride2_tiled_;
     VulkanPipeline conv_spatial4_tiled_small_;
     VulkanPipeline conv_spatial4_tiled_relu_;
@@ -82,6 +83,7 @@ private:
     VulkanPipeline activation_;
     VulkanPipeline add_;
     VulkanPipeline bilinear_;
+    bool use_spatial_tiled_oc4_ = false;
     bool enable_spatial_stride2_tiled_ = false;
 };
 

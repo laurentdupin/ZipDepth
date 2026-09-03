@@ -12,6 +12,7 @@
 #include "quantize_nchw_int8_spv.h"
 #include "reduce_absmax_spv.h"
 #include "conv2d_spatial_int8_spv.h"
+#include "conv2d_spatial_int8_relu_spv.h"
 #include "strip_attention_spv.h"
 #include "precision_pointwise_fp16_weights_spv.h"
 
@@ -44,9 +45,11 @@ ZipDepthOps::ZipDepthOps(midas_native::VulkanContext& c)
         reduce_absmax_=c.create_pipeline(midas_reduce_absmax_spv,midas_reduce_absmax_spv_size,2,8);
         quantize_int8_=c.create_pipeline(midas_quantize_nchw_int8_spv,midas_quantize_nchw_int8_spv_size,3,12);
         spatial_int8_=c.create_pipeline(midas_conv2d_spatial_int8_spv,midas_conv2d_spatial_int8_spv_size,6,20);
+        spatial_int8_relu_=c.create_pipeline(midas_conv2d_spatial_int8_relu_spv,midas_conv2d_spatial_int8_relu_spv_size,6,20);
         reduce_absmax_.set_debug_name("zipdepth_reduce_absmax");
         quantize_int8_.set_debug_name("zipdepth_quantize_int8");
         spatial_int8_.set_debug_name("zipdepth_conv2d_spatial_int8");
+        spatial_int8_relu_.set_debug_name("zipdepth_conv2d_spatial_int8_relu");
     }
 }
 
@@ -61,7 +64,7 @@ void ZipDepthOps::context_reduce(midas_native::VulkanBuffer&o,const midas_native
 void ZipDepthOps::convex(midas_native::VulkanBuffer&o,const midas_native::VulkanBuffer&d,const midas_native::VulkanBuffer&w,std::uint32_t width,std::uint32_t height){struct P{std::uint32_t w,h;}p{width,height};context_.dispatch(convex_,{&o,&d,&w},&p,sizeof(p),up(width*2,8),up(height*2,8));}
 void ZipDepthOps::mobile(midas_native::VulkanBuffer&o,const midas_native::VulkanBuffer&d,const midas_native::VulkanBuffer&a,std::uint32_t width,std::uint32_t height){struct P{std::uint32_t w,h;}p{width,height};context_.dispatch(mobile_,{&o,&d,&a},&p,sizeof(p),up(width*2,8),up(height*2,8));}
 
-void ZipDepthOps::spatial_int8(midas_native::VulkanBuffer&o,const midas_native::VulkanBuffer&i,const midas_native::VulkanBuffer&w,const midas_native::VulkanBuffer&ws,const midas_native::VulkanBuffer&b,std::uint32_t width,std::uint32_t height,std::uint32_t ic,std::uint32_t oc,bool has_bias){
+void ZipDepthOps::spatial_int8(midas_native::VulkanBuffer&o,const midas_native::VulkanBuffer&i,const midas_native::VulkanBuffer&w,const midas_native::VulkanBuffer&ws,const midas_native::VulkanBuffer&b,std::uint32_t width,std::uint32_t height,std::uint32_t ic,std::uint32_t oc,bool has_bias,bool relu){
     if(!context_.supports_packed_int8_dot())throw std::runtime_error("packed INT8 dot product is not supported");
     if(ic%4!=0)throw std::invalid_argument("INT8 convolution channels must be divisible by four");
     auto& scale=int8_workspace_.scales(sizeof(float),
@@ -87,7 +90,7 @@ void ZipDepthOps::spatial_int8(midas_native::VulkanBuffer&o,const midas_native::
     struct Q{std::uint32_t w,h,c;}q{width,height,ic};
     context_.dispatch(quantize_int8_,{&packed,&i,&scale},&q,sizeof(q),up(width*height*(ic/4),256));
     struct P{std::uint32_t w,h,ic,oc,bias;}p{width,height,ic,oc,has_bias?1u:0u};
-    context_.dispatch(spatial_int8_,{&o,&packed,&w,&scale,&ws,&b},&p,sizeof(p),up(width,8),up(height,8),oc);
+    context_.dispatch(relu?spatial_int8_relu_:spatial_int8_,{&o,&packed,&w,&scale,&ws,&b},&p,sizeof(p),up(width,8),up(height,8),oc);
 }
 
 void ZipDepthOps::pointwise_fp16_weights(midas_native::VulkanBuffer&o,const midas_native::VulkanBuffer&i,const midas_native::VulkanBuffer&w,const midas_native::VulkanBuffer&b,std::uint32_t spatial,std::uint32_t ic,std::uint32_t oc,bool has_bias){

@@ -11,6 +11,7 @@
 #include "conv2d_depthwise3_spv.h"
 #include "conv2d_spatial4_spv.h"
 #include "conv2d_spatial4_tiled_spv.h"
+#include "conv2d_spatial4_tiled_oc4_spv.h"
 #include "conv2d_spatial4_stride2_tiled_spv.h"
 #include "conv2d_spatial4_tiled_small_spv.h"
 #include "conv2d_spatial4_tiled_relu_spv.h"
@@ -70,6 +71,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           midas_conv2d_spatial4_tiled_spv_size,
           4,
           68)),
+      conv_spatial4_tiled_oc4_(context.create_pipeline(
+          midas_conv2d_spatial4_tiled_oc4_spv,
+          midas_conv2d_spatial4_tiled_oc4_spv_size,
+          4,
+          68)),
       conv_spatial4_stride2_tiled_(context.create_pipeline(
           midas_conv2d_spatial4_stride2_tiled_spv,
           midas_conv2d_spatial4_stride2_tiled_spv_size,
@@ -105,6 +111,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           midas_bilinear_spv_size,
           2,
           24)),
+      use_spatial_tiled_oc4_((!context.is_discrete_gpu() ||
+          environment_enabled("ZIPDEPTH_FORCE_SPATIAL_TILED_OC4")) &&
+          !environment_enabled("ZIPDEPTH_DISABLE_SPATIAL_TILED_OC4")),
       enable_spatial_stride2_tiled_((context.is_discrete_gpu() ||
           environment_enabled("ZIPDEPTH_ENABLE_SPATIAL_STRIDE2_TILED")) &&
           !environment_enabled("ZIPDEPTH_DISABLE_SPATIAL_STRIDE2_TILED")) {
@@ -117,6 +126,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv_spatial4_.set_debug_name("midas_conv2d_spatial4");
     conv_spatial4_tiled_.set_debug_name(
         "midas_conv2d_spatial4_tiled");
+    conv_spatial4_tiled_oc4_.set_debug_name(
+        "midas_conv2d_spatial4_tiled_oc4");
     conv_spatial4_stride2_tiled_.set_debug_name(
         "midas_conv2d_spatial4_stride2_tiled");
     conv_spatial4_tiled_small_.set_debug_name(
@@ -196,6 +207,8 @@ void VulkanOperators::conv(
         spatial4 && stride == 1 && padding_top == 1 &&
         padding_left == 1 && input_width == output_width &&
         input_height == output_height;
+    const bool spatial4_tiled_oc4 =
+        spatial4_tiled && !relu_input && use_spatial_tiled_oc4_;
     const bool spatial4_stride2_tiled = spatial4 &&
         enable_spatial_stride2_tiled_ && stride == 2 &&
         padding_top == 1 && padding_left == 1;
@@ -228,6 +241,8 @@ void VulkanOperators::conv(
             : (spatial4_tiled
             ? (spatial4_tiled_small
                 ? conv_spatial4_tiled_small_
+                : spatial4_tiled_oc4
+                ? conv_spatial4_tiled_oc4_
                 : (relu_input
                 ? conv_spatial4_tiled_relu_
                 : conv_spatial4_tiled_))
@@ -258,7 +273,9 @@ void VulkanOperators::conv(
             ? divide_up(output_channels, 4)
             : (spatial4
                 ? divide_up(output_channels,
-                    spatial4_tiled || spatial4_stride2_tiled ? 8 : 4)
+                    spatial4_stride2_tiled ? 8 :
+                    spatial4_tiled_oc4 ? 4 :
+                    spatial4_tiled ? 8 : 4)
                 : output_channels));
 }
 

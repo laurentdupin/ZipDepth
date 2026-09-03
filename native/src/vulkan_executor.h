@@ -33,7 +33,8 @@ private:
     Tensor make(std::uint32_t c,std::uint32_t h,std::uint32_t w);
     Tensor conv(const Tensor& in,const std::string& weight,const char* bias,
                 std::uint32_t stride=1,std::uint32_t padding=0,
-                std::uint32_t dilation=1,std::uint32_t groups=1);
+                std::uint32_t dilation=1,std::uint32_t groups=1,
+                std::uint32_t activation=0);
     Tensor bn(const Tensor& in,const std::string& prefix,bool relu);
     Tensor conv_bn(const Tensor& in,const std::string& prefix,
                    std::uint32_t stride=1,bool relu=true);
@@ -57,6 +58,7 @@ private:
     bool fp16_enabled_ = false;
     bool int8_enabled_ = false;
     bool int8_encoder_only_ = false;
+    bool fuse_rep_activation_ = true;
 };
 
 }  // namespace zipdepth_native

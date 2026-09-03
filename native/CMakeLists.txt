@@ -51,6 +51,9 @@ if(ZIPDEPTH_WITH_VULKAN)
     zipdepth_compile_shader(conv2d_spatial4 conv2d_spatial4 -DNO_BATCH_NORM=1)
     zipdepth_compile_shader(conv2d_spatial4_tiled conv2d_spatial4_tiled
         -DNO_BATCH_NORM=1 -DLOCAL_X=16 -DLOCAL_Y=4)
+    zipdepth_compile_shader(conv2d_spatial4_tiled_oc4 conv2d_spatial4_tiled
+        -DNO_BATCH_NORM=1 -DLOCAL_X=16 -DLOCAL_Y=4
+        -DOUTPUT_CHANNEL_TILE=4)
     zipdepth_compile_shader(conv2d_spatial4_stride2_tiled conv2d_spatial4_tiled
         -DNO_BATCH_NORM=1 -DLOCAL_X=16 -DLOCAL_Y=4 -DSAMPLE_STRIDE=2)
     zipdepth_compile_shader(conv2d_spatial4_tiled_small conv2d_spatial4_tiled
@@ -71,6 +74,11 @@ if(ZIPDEPTH_WITH_VULKAN)
             EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
             OUT_VAR ZIPDEPTH_SHADER_HEADERS)
     endforeach()
+    inferbridge_compile_native_support_shader(
+        NAME conv2d_spatial_int8_relu SOURCE_NAME conv2d_spatial_int8
+        PREFIX midas GENERATED_DIR "${ZIPDEPTH_GENERATED_DIR}"
+        EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        OUT_VAR ZIPDEPTH_SHADER_HEADERS EXTRA_ARGUMENTS -DFUSE_RELU=1)
     foreach(SHADER batch_norm_activation activation add bilinear elementwise
             channel_average strip_attention adaptive_average nearest maxpool5
             concat4 context_reduce convex_upsample mobile_upsample

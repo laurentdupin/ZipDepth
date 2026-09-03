@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -11,6 +12,7 @@ namespace zipdepth_native {
 namespace {
 std::uint64_t elements(std::uint32_t c,std::uint32_t h,std::uint32_t w){return std::uint64_t(c)*h*w;}
 std::uint32_t checked(std::uint64_t n){if(n>std::numeric_limits<std::uint32_t>::max())throw std::overflow_error("ZipDepth tensor too large");return static_cast<std::uint32_t>(n);}
+bool environment_enabled(const char* name){const char* value=std::getenv(name);return value&&value[0]&&value[0]!='0';}
 }
 
 VulkanExecutor::VulkanExecutor(const std::string& path,std::uint32_t index)
@@ -31,6 +33,8 @@ VulkanExecutor::VulkanExecutor(const std::string& path,std::uint32_t index)
     fp16_enabled_ = precision == inferbridge::native::Precision::fp16;
     int8_enabled_ = precision == inferbridge::native::Precision::int8;
     int8_encoder_only_ = false;
+    fuse_rep_activation_ =
+        !environment_enabled("ZIPDEPTH_DISABLE_REP_ACTIVATION_FUSION");
     weights_.reserve(model_.tensor_names().size());
     fp16_weights_.reserve(model_.tensor_names().size());
     int8_weights_.reserve(model_.tensor_names().size());
@@ -72,7 +76,8 @@ VulkanExecutor::Tensor VulkanExecutor::conv(
     std::uint32_t stride,
     std::uint32_t padding,
     std::uint32_t dilation,
-    std::uint32_t groups) {
+    std::uint32_t groups,
+    std::uint32_t activation) {
     const auto& shape = model_.tensor(name);
     if (shape.rank != 4 || groups == 0 ||
         shape.dimensions[1] != input.channels / groups) {
@@ -103,7 +108,8 @@ VulkanExecutor::Tensor VulkanExecutor::conv(
             output.buffer, input.buffer, quantized->second.packed,
             quantized->second.scales,
             bias_name ? weight(bias_name) : zero_, input.width, input.height,
-            input.channels, output_channels, bias_name != nullptr);
+            input.channels, output_channels, bias_name != nullptr,
+            activation == 1);
     } else if (
         fp16_enabled_ && groups == 1 && stride == 1 && dilation == 1 &&
         half != fp16_weights_.end() && kernel_height == 1 &&
@@ -119,7 +125,8 @@ VulkanExecutor::Tensor VulkanExecutor::conv(
             bias_name ? weight(bias_name) : zero_, input.width, input.height,
             input.channels, output_width, output_height, output_channels,
             kernel_height, kernel_width, stride, padding, padding, dilation,
-            groups, bias_name != nullptr);
+            groups, bias_name != nullptr, nullptr, nullptr, nullptr, nullptr,
+            activation);
     }
     return output;
 }
@@ -129,7 +136,9 @@ VulkanExecutor::Tensor VulkanExecutor::add(const Tensor&a,const Tensor&b,float s
 VulkanExecutor::Tensor VulkanExecutor::rep(const Tensor&i,const std::string&p,std::uint32_t stride){
     const std::string fused_weight=p+".fused_conv.weight";
     if(model_.contains(fused_weight)){
-        Tensor o=conv(i,fused_weight,(p+".fused_conv.bias").c_str(),stride,1);
+        Tensor o=conv(i,fused_weight,(p+".fused_conv.bias").c_str(),stride,1,
+            1,1,fuse_rep_activation_?1u:0u);
+        if(fuse_rep_activation_)return o;
         Tensor r=make(o.channels,o.height,o.width);
         operators_.activation(r.buffer,o.buffer,checked(elements(o.channels,o.height,o.width)),1);
         return r;
