@@ -9,6 +9,8 @@
 #include "metal_executor.h"
 #endif
 #include "zipdepth_internal.h"
+#include <inferbridge/native_harness_linux_dma_buf.h>
+#include <inferbridge/native_harness_resource_cache.h>
 
 #include <algorithm>
 #include <memory>
@@ -44,6 +46,10 @@ struct zipdepth_context {
 #if defined(ZIPDEPTH_WITH_VULKAN)
     std::unique_ptr<zipdepth_native::VulkanExecutor> gpu;
     std::unique_ptr<zipdepth_native::GpuIo> gpu_io;
+#if defined(__linux__) && !defined(__ANDROID__)
+    inferbridge::native_harness::StableResourceCache<ZipDepthDmaBufImage>
+        dma_buf_images;
+#endif
 #endif
 #if defined(ZIPDEPTH_WITH_METAL)
     std::unique_ptr<zipdepth_native::MetalExecutor> metal;
@@ -320,9 +326,13 @@ zipdepth_status ZIPDEPTH_CALL zipdepth_infer_dma_buf_vulkan_f32(
     (void)network_width;(void)network_height;(void)depth;(void)elements;
     return ZIPDEPTH_STATUS_VULKAN_UNAVAILABLE;
 #else
-    if (!context || !context->gpu || !context->gpu_io || dma_buf_fd < 0 ||
-        !allocation_size || !source_row_stride || !source_width ||
-        !source_height || !network_width || !network_height || !depth ||
+    const inferbridge::native_harness::LinuxDmaBufImage source{
+        dma_buf_fd, allocation_size, byte_offset, drm_modifier,
+        source_row_stride, source_width, source_height, source_is_rgba != 0u,
+    };
+    if (!context || !context->gpu || !context->gpu_io ||
+        !inferbridge::native_harness::valid_linux_dma_buf_image(source) ||
+        !network_width || !network_height || !depth ||
         elements < std::uint64_t(network_width) * network_height) {
         return ZIPDEPTH_STATUS_INVALID_ARGUMENT;
     }
@@ -330,14 +340,25 @@ zipdepth_status ZIPDEPTH_CALL zipdepth_infer_dma_buf_vulkan_f32(
         using Clock = std::chrono::steady_clock;
         const auto started = Clock::now();
         auto& vk = context->gpu->context();
-        auto imported = std::make_unique<ZipDepthDmaBufImage>();
-        imported->image = vk.import_dma_buf(
-            dma_buf_fd, allocation_size, byte_offset, drm_modifier,
-            source_row_stride, source_width, source_height,
-            source_is_rgba ? VK_FORMAT_R8G8B8A8_UNORM
-                           : VK_FORMAT_B8G8R8A8_UNORM,
-            VK_IMAGE_USAGE_SAMPLED_BIT);
-        auto& image = imported->image;
+        const VkFormat format = source.rgba
+            ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
+        const auto usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+        const std::uint64_t identity =
+            inferbridge::native_harness::linux_dma_buf_identity(dma_buf_fd);
+        if (identity == 0)
+            throw std::invalid_argument("could not identify DMA-BUF allocation");
+        bool cache_hit = false;
+        auto& imported = context->dma_buf_images.get_or_create(
+            {identity, source_width, source_height, format, usage,
+                allocation_size, byte_offset, source_row_stride, drm_modifier}, [&] {
+                ZipDepthDmaBufImage created;
+                created.image = vk.import_dma_buf(
+                    dma_buf_fd, allocation_size, byte_offset, drm_modifier,
+                    source_row_stride, source_width, source_height,
+                    format, usage);
+                return created;
+            }, &cache_hit);
+        auto& image = imported.image;
         const auto imported_at = Clock::now();
         midas_native::VulkanSemaphore wait;
         if (acquire_fence_fd >= 0) wait = vk.import_sync_fd(acquire_fence_fd);
@@ -372,8 +393,9 @@ zipdepth_status ZIPDEPTH_CALL zipdepth_infer_dma_buf_vulkan_f32(
                     end - begin).count();
             };
             std::fprintf(stderr,
-                "ZipDepthDMA frame=%llu import=%.3f gpu=%.3f download=%.3f total=%.3f\n",
+                "ZipDepthDMA frame=%llu cached=%d import=%.3f gpu=%.3f download=%.3f total=%.3f\n",
                 static_cast<unsigned long long>(current),
+                cache_hit ? 1 : 0,
                 milliseconds(started, imported_at),
                 milliseconds(imported_at, inferred_at),
                 milliseconds(inferred_at, finished),

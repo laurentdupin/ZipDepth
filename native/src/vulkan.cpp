@@ -1,4 +1,5 @@
 #include "vulkan.h"
+#include <inferbridge/native_harness_linux_dma_buf.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -1320,147 +1321,26 @@ VulkanImage VulkanContext::import_dma_buf(
     if (!external_capabilities_.dma_buf_import) {
         throw std::runtime_error("Vulkan device cannot import DMA-BUF images");
     }
-    if (file_descriptor < 0 || allocation_size == 0u || width == 0u ||
-        height == 0u || row_stride < width * 4u ||
-        format == VK_FORMAT_UNDEFINED ||
-        (usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u) {
-        throw std::invalid_argument("invalid DMA-BUF image");
-    }
-    const std::uint64_t required = byte_offset +
-        static_cast<std::uint64_t>(row_stride) * height;
-    if (required < byte_offset || required > allocation_size) {
-        throw std::invalid_argument("DMA-BUF image layout exceeds its allocation");
-    }
-
-    VkMemoryFdPropertiesKHR fd_properties{
-        VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
+    const inferbridge::native_harness::LinuxDmaBufImage source{
+        file_descriptor, allocation_size, byte_offset, modifier,
+        row_stride, width, height, format == VK_FORMAT_R8G8B8A8_UNORM,
     };
-    check(get_memory_fd_properties_(
-        device_, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-        file_descriptor, &fd_properties),
-        "vkGetMemoryFdPropertiesKHR(DMA-BUF)");
-
-    const VkSubresourceLayout plane_layout{
-        static_cast<VkDeviceSize>(byte_offset),
-        static_cast<VkDeviceSize>(allocation_size - byte_offset),
-        static_cast<VkDeviceSize>(row_stride),
-        0,
-        0,
-    };
-    const VkImageDrmFormatModifierExplicitCreateInfoEXT modifier_info{
-        VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
-        nullptr,
-        modifier,
-        1u,
-        &plane_layout,
-    };
-    const VkExternalMemoryImageCreateInfo external_image{
-        VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-        &modifier_info,
-        VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-    };
-    const VkImageCreateInfo image_info{
-        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        &external_image,
-        0,
-        VK_IMAGE_TYPE_2D,
-        format,
-        {width, height, 1},
-        1,
-        1,
-        VK_SAMPLE_COUNT_1_BIT,
-        VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
-        usage,
-        VK_SHARING_MODE_EXCLUSIVE,
-        0,
-        nullptr,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-    };
-
+    const auto imported =
+        inferbridge::native_harness::import_linux_dma_buf_vulkan(
+            device_, get_memory_fd_properties_, source, format, usage,
+            [this](const std::uint32_t type_bits) {
+                return find_memory_type(type_bits, 0);
+            });
     VulkanImage result;
     result.owner_ = this;
     result.format_ = format;
     result.width_ = width;
     result.height_ = height;
-    check(vkCreateImage(device_, &image_info, nullptr, &result.image_),
-        "vkCreateImage(DMA-BUF import)");
-    int duplicate = -1;
-    try {
-        VkMemoryRequirements requirements{};
-        vkGetImageMemoryRequirements(device_, result.image_, &requirements);
-        duplicate = dup(file_descriptor);
-        if (duplicate < 0) {
-            throw std::runtime_error("could not duplicate DMA-BUF fd");
-        }
-        const VkImportMemoryFdInfoKHR import{
-            VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
-            nullptr,
-            VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-            duplicate,
-        };
-        const VkMemoryDedicatedAllocateInfo dedicated{
-            VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
-            &import,
-            result.image_,
-            VK_NULL_HANDLE,
-        };
-        const VkMemoryAllocateInfo allocation{
-            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            &dedicated,
-            requirements.size,
-            find_memory_type(
-                requirements.memoryTypeBits & fd_properties.memoryTypeBits, 0),
-        };
-        check(vkAllocateMemory(device_, &allocation, nullptr, &result.memory_),
-            "vkAllocateMemory(DMA-BUF import)");
-        // Vulkan owns the imported duplicate after successful allocation.
-        duplicate = -1;
-        check(vkBindImageMemory(device_, result.image_, result.memory_, 0),
-            "vkBindImageMemory(DMA-BUF import)");
-        const VkImageViewCreateInfo view_info{
-            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            nullptr,
-            0,
-            result.image_,
-            VK_IMAGE_VIEW_TYPE_2D,
-            format,
-            {
-                VK_COMPONENT_SWIZZLE_IDENTITY,
-                VK_COMPONENT_SWIZZLE_IDENTITY,
-                VK_COMPONENT_SWIZZLE_IDENTITY,
-                VK_COMPONENT_SWIZZLE_IDENTITY,
-            },
-            {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-        };
-        check(vkCreateImageView(device_, &view_info, nullptr, &result.view_),
-            "vkCreateImageView(DMA-BUF import)");
-        const VkSamplerCreateInfo sampler_info{
-            VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-            nullptr,
-            0,
-            VK_FILTER_NEAREST,
-            VK_FILTER_NEAREST,
-            VK_SAMPLER_MIPMAP_MODE_NEAREST,
-            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            0.0f,
-            VK_FALSE,
-            1.0f,
-            VK_FALSE,
-            VK_COMPARE_OP_ALWAYS,
-            0.0f,
-            0.0f,
-            VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
-            VK_FALSE,
-        };
-        check(vkCreateSampler(device_, &sampler_info, nullptr, &result.sampler_),
-            "vkCreateSampler(DMA-BUF import)");
-        return result;
-    } catch (...) {
-        if (duplicate >= 0) close(duplicate);
-        throw;
-    }
+    result.image_ = imported.image;
+    result.memory_ = imported.memory;
+    result.view_ = imported.view;
+    result.sampler_ = imported.sampler;
+    return result;
 }
 #endif
 
