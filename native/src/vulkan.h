@@ -63,8 +63,10 @@ struct VulkanExternalCapabilities {
     bool d3d12_r32_storage_image_import = false;
 #if defined(__ANDROID__)
     bool android_hardware_buffer_import = false;
-    bool sync_fd_import = false;
+#elif defined(__linux__)
+    bool dma_buf_import = false;
 #endif
+    bool sync_fd_import = false;
 };
 
 class VulkanSemaphore {
@@ -217,6 +219,19 @@ public:
         std::uint32_t height,
         VkFormat format,
         VkImageUsageFlags usage);
+#elif defined(__linux__)
+    VulkanImage import_dma_buf(
+        int file_descriptor,
+        std::uint64_t allocation_size,
+        std::uint64_t byte_offset,
+        std::uint64_t modifier,
+        std::uint32_t row_stride,
+        std::uint32_t width,
+        std::uint32_t height,
+        VkFormat format,
+        VkImageUsageFlags usage);
+#endif
+#if defined(__ANDROID__) || defined(__linux__)
     VulkanSemaphore import_sync_fd(int file_descriptor);
 #endif
 
@@ -465,6 +480,9 @@ private:
 #elif defined(__ANDROID__)
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID
         get_android_hardware_buffer_properties_ = nullptr;
+    PFN_vkImportSemaphoreFdKHR import_semaphore_fd_ = nullptr;
+#elif defined(__linux__)
+    PFN_vkGetMemoryFdPropertiesKHR get_memory_fd_properties_ = nullptr;
     PFN_vkImportSemaphoreFdKHR import_semaphore_fd_ = nullptr;
 #endif
     std::atomic<std::uint64_t> tensor_upload_bytes_{0};

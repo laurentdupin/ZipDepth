@@ -9,6 +9,8 @@
 #include <utility>
 #if defined(__ANDROID__)
 #include <android/hardware_buffer.h>
+#endif
+#if defined(__ANDROID__) || defined(__linux__)
 #include <unistd.h>
 #endif
 #include <vector>
@@ -332,6 +334,21 @@ VulkanContext::VulkanContext(
             VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
     }
 #endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    const bool has_external_memory_fd = has_extension(
+        extensions, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+    const bool has_drm_format_modifier = has_extension(
+        extensions, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+    const bool has_external_semaphore_fd = has_extension(
+        extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    if (has_external_memory_fd && has_drm_format_modifier) {
+        enabled_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+        enabled_extensions.push_back(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+    }
+    if (has_external_semaphore_fd) {
+        enabled_extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    }
+#endif
 #if defined(_WIN32)
     const bool has_external_memory_win32 = has_extension(
         extensions, VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
@@ -564,6 +581,16 @@ VulkanContext::VulkanContext(
     external_capabilities_.android_hardware_buffer_import =
         has_android_hardware_buffer &&
         get_android_hardware_buffer_properties_ != nullptr;
+    external_capabilities_.sync_fd_import =
+        has_external_semaphore_fd && import_semaphore_fd_ != nullptr;
+#elif defined(__linux__)
+    get_memory_fd_properties_ = reinterpret_cast<PFN_vkGetMemoryFdPropertiesKHR>(
+        vkGetDeviceProcAddr(device_, "vkGetMemoryFdPropertiesKHR"));
+    import_semaphore_fd_ = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+        vkGetDeviceProcAddr(device_, "vkImportSemaphoreFdKHR"));
+    external_capabilities_.dma_buf_import =
+        has_external_memory_fd && has_drm_format_modifier &&
+        get_memory_fd_properties_ != nullptr;
     external_capabilities_.sync_fd_import =
         has_external_semaphore_fd && import_semaphore_fd_ != nullptr;
 #endif
@@ -1277,14 +1304,174 @@ VulkanImage VulkanContext::import_android_hardware_buffer(
         throw;
     }
 }
+#endif
 
+#if defined(__linux__) && !defined(__ANDROID__)
+VulkanImage VulkanContext::import_dma_buf(
+    int file_descriptor,
+    std::uint64_t allocation_size,
+    std::uint64_t byte_offset,
+    std::uint64_t modifier,
+    std::uint32_t row_stride,
+    std::uint32_t width,
+    std::uint32_t height,
+    VkFormat format,
+    VkImageUsageFlags usage) {
+    if (!external_capabilities_.dma_buf_import) {
+        throw std::runtime_error("Vulkan device cannot import DMA-BUF images");
+    }
+    if (file_descriptor < 0 || allocation_size == 0u || width == 0u ||
+        height == 0u || row_stride < width * 4u ||
+        format == VK_FORMAT_UNDEFINED ||
+        (usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u) {
+        throw std::invalid_argument("invalid DMA-BUF image");
+    }
+    const std::uint64_t required = byte_offset +
+        static_cast<std::uint64_t>(row_stride) * height;
+    if (required < byte_offset || required > allocation_size) {
+        throw std::invalid_argument("DMA-BUF image layout exceeds its allocation");
+    }
+
+    VkMemoryFdPropertiesKHR fd_properties{
+        VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
+    };
+    check(get_memory_fd_properties_(
+        device_, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+        file_descriptor, &fd_properties),
+        "vkGetMemoryFdPropertiesKHR(DMA-BUF)");
+
+    const VkSubresourceLayout plane_layout{
+        static_cast<VkDeviceSize>(byte_offset),
+        static_cast<VkDeviceSize>(allocation_size - byte_offset),
+        static_cast<VkDeviceSize>(row_stride),
+        0,
+        0,
+    };
+    const VkImageDrmFormatModifierExplicitCreateInfoEXT modifier_info{
+        VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
+        nullptr,
+        modifier,
+        1u,
+        &plane_layout,
+    };
+    const VkExternalMemoryImageCreateInfo external_image{
+        VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        &modifier_info,
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+    };
+    const VkImageCreateInfo image_info{
+        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        &external_image,
+        0,
+        VK_IMAGE_TYPE_2D,
+        format,
+        {width, height, 1},
+        1,
+        1,
+        VK_SAMPLE_COUNT_1_BIT,
+        VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        usage,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        nullptr,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    VulkanImage result;
+    result.owner_ = this;
+    result.format_ = format;
+    result.width_ = width;
+    result.height_ = height;
+    check(vkCreateImage(device_, &image_info, nullptr, &result.image_),
+        "vkCreateImage(DMA-BUF import)");
+    int duplicate = -1;
+    try {
+        VkMemoryRequirements requirements{};
+        vkGetImageMemoryRequirements(device_, result.image_, &requirements);
+        duplicate = dup(file_descriptor);
+        if (duplicate < 0) {
+            throw std::runtime_error("could not duplicate DMA-BUF fd");
+        }
+        const VkImportMemoryFdInfoKHR import{
+            VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+            nullptr,
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+            duplicate,
+        };
+        const VkMemoryDedicatedAllocateInfo dedicated{
+            VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+            &import,
+            result.image_,
+            VK_NULL_HANDLE,
+        };
+        const VkMemoryAllocateInfo allocation{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            &dedicated,
+            requirements.size,
+            find_memory_type(
+                requirements.memoryTypeBits & fd_properties.memoryTypeBits, 0),
+        };
+        check(vkAllocateMemory(device_, &allocation, nullptr, &result.memory_),
+            "vkAllocateMemory(DMA-BUF import)");
+        // Vulkan owns the imported duplicate after successful allocation.
+        duplicate = -1;
+        check(vkBindImageMemory(device_, result.image_, result.memory_, 0),
+            "vkBindImageMemory(DMA-BUF import)");
+        const VkImageViewCreateInfo view_info{
+            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            nullptr,
+            0,
+            result.image_,
+            VK_IMAGE_VIEW_TYPE_2D,
+            format,
+            {
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        };
+        check(vkCreateImageView(device_, &view_info, nullptr, &result.view_),
+            "vkCreateImageView(DMA-BUF import)");
+        const VkSamplerCreateInfo sampler_info{
+            VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            nullptr,
+            0,
+            VK_FILTER_NEAREST,
+            VK_FILTER_NEAREST,
+            VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            0.0f,
+            VK_FALSE,
+            1.0f,
+            VK_FALSE,
+            VK_COMPARE_OP_ALWAYS,
+            0.0f,
+            0.0f,
+            VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+            VK_FALSE,
+        };
+        check(vkCreateSampler(device_, &sampler_info, nullptr, &result.sampler_),
+            "vkCreateSampler(DMA-BUF import)");
+        return result;
+    } catch (...) {
+        if (duplicate >= 0) close(duplicate);
+        throw;
+    }
+}
+#endif
+
+#if defined(__ANDROID__) || defined(__linux__)
 VulkanSemaphore VulkanContext::import_sync_fd(int file_descriptor) {
     if (!external_capabilities_.sync_fd_import || file_descriptor < 0) {
-        throw std::invalid_argument("invalid Android sync fence");
+        throw std::invalid_argument("invalid sync fence fd");
     }
     const int duplicate = dup(file_descriptor);
     if (duplicate < 0) {
-        throw std::runtime_error("could not duplicate Android sync fence");
+        throw std::runtime_error("could not duplicate sync fence fd");
     }
     VulkanSemaphore result;
     result.owner_ = this;
@@ -1296,7 +1483,7 @@ VulkanSemaphore VulkanContext::import_sync_fd(int file_descriptor) {
     try {
         check(vkCreateSemaphore(
             device_, &semaphore_info, nullptr, &result.semaphore_),
-            "vkCreateSemaphore(Android sync fd import)");
+            "vkCreateSemaphore(sync fd import)");
         const VkImportSemaphoreFdInfoKHR import{
             VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
             nullptr,
