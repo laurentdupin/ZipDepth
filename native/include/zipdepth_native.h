@@ -94,24 +94,6 @@ zipdepth_infer_android_hardware_buffer_vulkan_f32(
     float* depth_hw,
     uint64_t depth_elements);
 #endif
-#if defined(__linux__) && !defined(__ANDROID__)
-ZIPDEPTH_API zipdepth_status ZIPDEPTH_CALL
-zipdepth_infer_dma_buf_vulkan_f32(
-    zipdepth_context* context,
-    int dma_buf_fd,
-    uint64_t allocation_size,
-    uint64_t byte_offset,
-    uint64_t drm_modifier,
-    uint32_t source_row_stride,
-    uint32_t source_width,
-    uint32_t source_height,
-    uint32_t source_is_rgba,
-    int acquire_fence_fd,
-    uint32_t network_width,
-    uint32_t network_height,
-    float* depth_hw,
-    uint64_t depth_elements);
-#endif
 
 #ifdef __cplusplus
 }
