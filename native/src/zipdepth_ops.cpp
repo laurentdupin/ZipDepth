@@ -90,7 +90,9 @@ void ZipDepthOps::spatial_int8(midas_native::VulkanBuffer&o,const midas_native::
     struct Q{std::uint32_t w,h,c;}q{width,height,ic};
     context_.dispatch(quantize_int8_,{&packed,&i,&scale},&q,sizeof(q),up(width*height*(ic/4),256));
     struct P{std::uint32_t w,h,ic,oc,bias;}p{width,height,ic,oc,has_bias?1u:0u};
-    context_.dispatch(relu?spatial_int8_relu_:spatial_int8_,{&o,&packed,&w,&scale,&ws,&b},&p,sizeof(p),up(width,8),up(height,8),oc);
+    context_.dispatch(relu?spatial_int8_relu_:spatial_int8_,
+        {&o,&packed,&w,&scale,&ws,&b},&p,sizeof(p),
+        up(width,16),up(height,8),up(oc,4));
 }
 
 void ZipDepthOps::pointwise_fp16_weights(midas_native::VulkanBuffer&o,const midas_native::VulkanBuffer&i,const midas_native::VulkanBuffer&w,const midas_native::VulkanBuffer&b,std::uint32_t spatial,std::uint32_t ic,std::uint32_t oc,bool has_bias){
