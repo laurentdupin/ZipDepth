@@ -67,7 +67,7 @@ if(ZIPDEPTH_WITH_VULKAN)
     zipdepth_compile_shader(quantize_rows_int8)
     zipdepth_compile_shader(precision_spatial_fp16)
     zipdepth_compile_shader(precision_spatial_int8)
-    foreach(SHARED_SHADER reduce_absmax quantize_nchw_int8 conv2d_spatial_int8)
+    foreach(SHARED_SHADER reduce_absmax quantize_nchw_int8)
         inferbridge_compile_native_support_shader(
             NAME "${SHARED_SHADER}" PREFIX midas
             GENERATED_DIR "${ZIPDEPTH_GENERATED_DIR}"
@@ -75,7 +75,12 @@ if(ZIPDEPTH_WITH_VULKAN)
             OUT_VAR ZIPDEPTH_SHADER_HEADERS)
     endforeach()
     inferbridge_compile_native_support_shader(
-        NAME conv2d_spatial_int8_relu SOURCE_NAME conv2d_spatial_int8
+        NAME conv2d_spatial_int8 SOURCE_NAME conv2d_spatial_int8_tiled
+        PREFIX midas GENERATED_DIR "${ZIPDEPTH_GENERATED_DIR}"
+        EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        OUT_VAR ZIPDEPTH_SHADER_HEADERS)
+    inferbridge_compile_native_support_shader(
+        NAME conv2d_spatial_int8_relu SOURCE_NAME conv2d_spatial_int8_tiled
         PREFIX midas GENERATED_DIR "${ZIPDEPTH_GENERATED_DIR}"
         EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
         OUT_VAR ZIPDEPTH_SHADER_HEADERS EXTRA_ARGUMENTS -DFUSE_RELU=1)
