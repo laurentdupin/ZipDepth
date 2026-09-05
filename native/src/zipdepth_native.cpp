@@ -14,6 +14,7 @@
 #include <inferbridge/native_harness_resource_cache.h>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -404,8 +405,6 @@ zipdepth_status ZIPDEPTH_CALL zipdepth_infer_dma_buf_vulkan_f32(
                 input, image, network_width, network_height);
             auto inferred = context->gpu->infer_device(
                 std::move(input), network_width, network_height);
-            context->gpu_io->normalize_relative(
-                inferred.buffer, network_width * network_height);
             output = std::move(inferred.buffer);
             vk.release_external_image(
                 image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -415,6 +414,19 @@ zipdepth_status ZIPDEPTH_CALL zipdepth_infer_dma_buf_vulkan_f32(
         const auto inferred_at = Clock::now();
         vk.download(output, depth, static_cast<std::size_t>(
             std::uint64_t(network_width) * network_height * sizeof(float)));
+        // Match the host harness's normalization, including degenerate maps.
+        // Depth is already downloaded for this host-output adapter.
+        auto end = depth + std::uint64_t(network_width) * network_height;
+        const auto bounds = std::minmax_element(depth, end);
+        const float minimum = *bounds.first, maximum = *bounds.second;
+        const float span = maximum - minimum;
+        if (!std::isfinite(minimum) || !std::isfinite(maximum) || span <= 1.0e-8f)
+            std::fill(depth, end, 1.0f);
+        else {
+            const float inverse_span = 1.0f / span;
+            for (auto value = depth; value != end; ++value)
+                *value = std::clamp((*value - minimum) * inverse_span, 0.0f, 1.0f);
+        }
         const auto finished = Clock::now();
         static std::atomic<uint64_t> count{0u};
         const uint64_t current = ++count;
