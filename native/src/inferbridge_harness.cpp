@@ -1,5 +1,6 @@
 
 #include "inferbridge_harness.h"
+#include <inferbridge/linux_capture.h>
 
 #include "zipdepth_native.h"
 #include "inferbridge/native_harness_precision.h"
@@ -75,6 +76,17 @@ struct ibrh_model {
     uint32_t input_size = 384u;
     std::mutex submit_mutex;
 };
+
+extern "C" IBRH_API ibrh_result IBRH_CALL ibrh_model_get_linux_capture_capabilities(
+    ibrh_model* model, size_t size, ibr_linux_capture_capabilities* output) {
+    if (!model || !output) return IBRH_ERROR_INVALID_ARGUMENT;
+    if (size < sizeof(*output)) return IBRH_ERROR_STRUCT_TOO_SMALL;
+    std::lock_guard<std::mutex> guard(model->submit_mutex);
+    if (model->runtime->force_host_transfers) {
+        *output = {}; output->struct_size = sizeof(*output); return IBRH_OK;
+    }
+    return zipdepth_linux_capture_capabilities(model->context, output);
+}
 
 struct ibrh_job {
     std::atomic<uint32_t> references{1u};
@@ -258,6 +270,10 @@ public:
         void* android_hardware_buffer = nullptr;
         uint64_t android_hardware_buffer_id = 0u;
 		int acquire_fence_fd = -1;
+		int dma_buf_fd = -1;
+		uint64_t dma_buf_allocation_size = 0u;
+		uint64_t dma_buf_byte_offset = 0u;
+		uint64_t dma_buf_modifier = 0u;
 		std::chrono::steady_clock::time_point enqueued_at{};
     };
 
@@ -311,6 +327,28 @@ private:
                     work.acquire_fence_fd, work.width, work.height,
                     network_width, network_height, temporary.data(),
                     temporary.size());
+            if (result != ZIPDEPTH_STATUS_OK) {
+                throw std::runtime_error(zipdepth_last_error());
+            }
+            for (uint32_t y = 0; y < network_height; ++y) {
+                std::copy_n(
+                    temporary.data() + uint64_t(y) * network_width,
+                    network_width,
+                    work.destination + uint64_t(y) * work.destination_stride);
+            }
+            return;
+        }
+#endif
+#if defined(ZIPDEPTH_WITH_VULKAN) && defined(__linux__) && !defined(__ANDROID__)
+        if (work.dma_buf_fd >= 0) {
+            std::vector<float> temporary(static_cast<size_t>(plane));
+            const zipdepth_status result = zipdepth_infer_dma_buf_vulkan_f32(
+                work.context, work.dma_buf_fd,
+                work.dma_buf_allocation_size, work.dma_buf_byte_offset,
+                work.dma_buf_modifier, work.row_stride,
+                work.width, work.height, work.rgba ? 1u : 0u,
+                work.acquire_fence_fd, network_width, network_height,
+                temporary.data(), temporary.size());
             if (result != ZIPDEPTH_STATUS_OK) {
                 throw std::runtime_error(zipdepth_last_error());
             }
@@ -541,6 +579,13 @@ ibrh_result IBRH_CALL query_capabilities(
         1ull << IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER;
     capabilities->synchronization_mask |= 1ull << IBRH_SYNC_SYNC_FD;
 #endif
+#if defined(ZIPDEPTH_WITH_VULKAN) && defined(__linux__) && !defined(__ANDROID__)
+    capabilities->flags |= IBRH_CAP_GPU_RESOURCES |
+        IBRH_CAP_EXTERNAL_SYNCHRONIZATION;
+    capabilities->input_domain_mask |=
+        1ull << IBRH_RESOURCE_DOMAIN_DMA_BUF;
+    capabilities->synchronization_mask |= 1ull << IBRH_SYNC_SYNC_FD;
+#endif
 #if defined(ZIPDEPTH_WITH_VULKAN) && defined(_WIN32)
     try {
         if (zipdepth_native::probe_external_gpu(0u).available) {
@@ -762,7 +807,8 @@ ibrh_result IBRH_CALL model_plan_outputs(
         return IBRH_ERROR_INVALID_ARGUMENT;
     if (request->inputs[0].domain == IBRH_RESOURCE_DOMAIN_HOST ||
         request->inputs[0].domain ==
-            IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER) {
+            IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER ||
+        request->inputs[0].domain == IBRH_RESOURCE_DOMAIN_DMA_BUF) {
         network_dimensions(
             request->inputs[0].width, request->inputs[0].height, network_size,
             outputs[0].width, outputs[0].height);
@@ -797,7 +843,8 @@ ibrh_result IBRH_CALL submit(
     uint32_t expected_width = input.width;
     uint32_t expected_height = input.height;
     if (input.domain == IBRH_RESOURCE_DOMAIN_HOST ||
-        input.domain == IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER)
+        input.domain == IBRH_RESOURCE_DOMAIN_ANDROID_HARDWARE_BUFFER ||
+        input.domain == IBRH_RESOURCE_DOMAIN_DMA_BUF)
         network_dimensions(
             input.width, input.height, network_size,
             expected_width, expected_height);
@@ -957,6 +1004,78 @@ ibrh_result IBRH_CALL submit(
                     static_cast<uintptr_t>(input.native_handle)),
                 input.auxiliary_handle,
                 acquire_fence})) {
+            delete job;
+            return IBRH_ERROR_INVALID_STATE;
+        }
+        *output = job;
+        return IBRH_OK;
+    }
+#endif
+#if defined(ZIPDEPTH_WITH_VULKAN) && defined(__linux__) && !defined(__ANDROID__)
+    if (input.domain == IBRH_RESOURCE_DOMAIN_DMA_BUF) {
+        const bool synchronization_valid =
+            source.synchronization.kind == IBRH_SYNC_NONE ||
+            (source.synchronization.kind == IBRH_SYNC_SYNC_FD &&
+             source.synchronization.operation == IBRH_SYNC_WAIT &&
+             source.synchronization.native_handle_type ==
+                 IBRH_NATIVE_HANDLE_POSIX_FD &&
+             source.synchronization.native_handle != 0u);
+        const uint64_t required_bytes = input.byte_offset +
+            static_cast<uint64_t>(input.row_stride_bytes) * input.height;
+        if (destination.domain != IBRH_RESOURCE_DOMAIN_HOST ||
+            input.native_handle_type != IBRH_NATIVE_HANDLE_POSIX_FD ||
+            input.native_handle == 0u ||
+            destination.native_handle_type != IBRH_NATIVE_HANDLE_HOST_POINTER ||
+            destination.native_handle == 0u ||
+            (input.pixel_format != IBRH_PIXEL_BGRA8 &&
+             input.pixel_format != IBRH_PIXEL_RGBA8) ||
+            input.row_stride_bytes < input.width * 4u ||
+            input.byte_offset > input.byte_size ||
+            required_bytes < input.byte_offset ||
+            (input.auxiliary_handle == 0 && required_bytes > input.byte_size) ||
+            destination.row_stride_bytes <
+                destination.width * sizeof(float) ||
+            destination.row_stride_bytes % sizeof(float) != 0u ||
+            !synchronization_valid ||
+            target.synchronization.kind != IBRH_SYNC_NONE) {
+            return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
+        }
+        auto* depth = reinterpret_cast<float*>(
+            static_cast<uintptr_t>(destination.native_handle) +
+            destination.byte_offset);
+        auto* job = new (std::nothrow) ibrh_job();
+        if (!job) return IBRH_ERROR_INTERNAL;
+        uint32_t admitted = model->host_admissions->load();
+        while (admitted < 3u &&
+            !model->host_admissions->compare_exchange_weak(
+                admitted, admitted + 1u)) {}
+        if (admitted >= 3u) {
+            delete job;
+            return IBRH_ERROR_INVALID_STATE;
+        }
+        job->gpu_admission = model->host_admissions;
+        job->source_frame_id = request->source_frame_id;
+        job->timestamp_ns = request->timestamp_ns;
+        job->width = destination.width;
+        job->height = destination.height;
+        ZipDepthHostWorker::Work work;
+        work.job = job;
+        work.context = model->context;
+        work.width = input.width;
+        work.height = input.height;
+        work.row_stride = input.row_stride_bytes;
+        work.rgba = input.pixel_format == IBRH_PIXEL_RGBA8;
+        work.network_size = network_size;
+        work.destination = depth;
+        work.destination_stride = static_cast<uint32_t>(
+            destination.row_stride_bytes / sizeof(float));
+        work.acquire_fence_fd = source.synchronization.kind == IBRH_SYNC_SYNC_FD
+            ? static_cast<int>(source.synchronization.native_handle) : -1;
+        work.dma_buf_fd = static_cast<int>(input.native_handle);
+        work.dma_buf_allocation_size = input.byte_size;
+        work.dma_buf_byte_offset = input.byte_offset;
+        work.dma_buf_modifier = input.auxiliary_handle;
+        if (!model->host_worker || !model->host_worker->enqueue(work)) {
             delete job;
             return IBRH_ERROR_INVALID_STATE;
         }
