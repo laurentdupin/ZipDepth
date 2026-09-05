@@ -67,17 +67,8 @@ int ZIPDEPTH_CALL zipdepth_linux_capture_capabilities(
     try {
         if (!context || !context->gpu) return IBRH_OK;
         auto& vk = context->gpu->context();
-        if (!vk.external_capabilities().dma_buf_import) return IBRH_OK;
-        const auto caps = inferbridge::linux_dma_buf::query(vk.physical_device(), VK_IMAGE_USAGE_SAMPLED_BIT);
-        if (!caps.available()) return IBRH_OK;
-        output->render_major = static_cast<uint32_t>(caps.render_major);
-        output->render_minor = static_cast<uint32_t>(caps.render_minor);
-        for (const auto& format : caps.formats) for (auto modifier : format.modifiers) {
-            if (output->format_count == IBR_LINUX_CAPTURE_MAX_FORMATS) break;
-            auto& entry = output->formats[output->format_count++];
-            entry.pixel_format = format.format == VK_FORMAT_B8G8R8A8_UNORM ? IBRH_PIXEL_BGRA8 : IBRH_PIXEL_RGBA8;
-            entry.modifier = modifier;
-        }
+        *output = inferbridge::linux_capture::query_linux_capture_capabilities(
+            vk.physical_device(), vk.external_capabilities().dma_buf_import);
     } catch (...) { output->format_count = 0; }
 #else
     (void)context;
