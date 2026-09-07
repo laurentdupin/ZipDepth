@@ -373,11 +373,13 @@ public:
             batch_segments_.clear();
         } catch (...) {
             batch_segmenting_enabled_ = false;
-            cancel_batch();
+            // The unsubmitted batch may own retired tensors still referenced
+            // by an earlier segment. Complete submitted work before recycling.
             if (!batch_segments_.empty()) {
                 try { batch_segments_.back().wait(); } catch (...) {}
-                batch_segments_.clear();
             }
+            cancel_batch();
+            batch_segments_.clear();
             batch_segment_wait_ = {};
             throw;
         }
