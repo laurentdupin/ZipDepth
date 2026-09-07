@@ -92,6 +92,7 @@ if(ZIPDEPTH_WITH_VULKAN)
         zipdepth_compile_shader(${SHADER})
     endforeach()
     zipdepth_compile_shader(preprocess_capture)
+    zipdepth_compile_shader(decoder_fusion)
 endif()
 
 add_library(zipdepth_native SHARED

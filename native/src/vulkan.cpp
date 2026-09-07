@@ -479,6 +479,10 @@ VulkanContext::VulkanContext(
         profile_environment[0] != '0' &&
         family->timestampValidBits != 0;
     timestamp_period_ns_ = properties.limits.timestampPeriod;
+    if (profile_environment && profile_environment[0] && profile_environment[0] != '0') {
+        std::fprintf(stderr, "ZipDepth profiling requested: enabled=%d timestamp_bits=%u period_ns=%g\n",
+            profile_dispatches_, family->timestampValidBits, timestamp_period_ns_);
+    }
 
 #if defined(__ANDROID__)
     // Inference is a background producer for an interactive stereo renderer.
@@ -718,7 +722,13 @@ void VulkanContext::record_profile(
 }
 
 void VulkanContext::print_profile() const noexcept {
-    if (!profile_dispatches_ || profile_stats_.empty()) return;
+    if (!profile_dispatches_) return;
+    if (profile_stats_.empty()) {
+        std::fprintf(stderr, "ZipDepth Vulkan profile: no per-dispatch samples; "
+            "external asynchronous batches bypass this profiler. "
+            "Use HOST input for isolated operator profiling.\n");
+        return;
+    }
     std::vector<std::pair<std::string, ProfileStat>> sorted(
         profile_stats_.begin(), profile_stats_.end());
     std::sort(

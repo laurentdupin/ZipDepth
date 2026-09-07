@@ -10,6 +10,11 @@ namespace zipdepth_native {
 class ZipDepthOps {
 public:
     explicit ZipDepthOps(midas_native::VulkanContext& context);
+    void decoder_fusion(midas_native::VulkanBuffer& out,
+        const midas_native::VulkanBuffer& low, const midas_native::VulkanBuffer& high,
+        const midas_native::VulkanBuffer& gamma, const midas_native::VulkanBuffer& beta,
+        const midas_native::VulkanBuffer& mean, const midas_native::VulkanBuffer& variance,
+        std::uint32_t iw, std::uint32_t ih, std::uint32_t ow, std::uint32_t oh, std::uint32_t channels);
     void elementwise(midas_native::VulkanBuffer& out,
         const midas_native::VulkanBuffer& a,
         const midas_native::VulkanBuffer& b, std::uint32_t count,
@@ -69,6 +74,7 @@ public:
         std::uint32_t output_channels, bool has_bias);
 private:
     midas_native::VulkanContext& context_;
+    midas_native::VulkanPipeline decoder_fusion_;
     inferbridge::native::Int8ActivationWorkspace<midas_native::VulkanBuffer>
         int8_workspace_;
     midas_native::VulkanPipeline elementwise_, channel_average_, strip_,

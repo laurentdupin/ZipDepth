@@ -148,7 +148,27 @@ VulkanExecutor::Tensor VulkanExecutor::resize(const Tensor&i,std::uint32_t w,std
 
 VulkanExecutor::Tensor VulkanExecutor::nearest(const Tensor&i,std::uint32_t w,std::uint32_t h){Tensor o=make(i.channels,h,w);extra_.nearest(o.buffer,i.buffer,i.width,i.height,w,h,i.channels);return o;}
 VulkanExecutor::Tensor VulkanExecutor::adaptive(const Tensor&i,std::uint32_t w,std::uint32_t h){Tensor o=make(i.channels,h,w);extra_.adaptive_average(o.buffer,i.buffer,i.width,i.height,w,h,i.channels);return o;}
-VulkanExecutor::Tensor VulkanExecutor::fusion(const Tensor&high,const Tensor&low,const std::string&p){auto oc=static_cast<std::uint32_t>(model_.tensor(p+".proj_high.weight").dimensions[0]);std::uint32_t gh=high.channels%4==0&&oc%4==0?4:1,gl=low.channels%4==0&&oc%4==0?4:1;Tensor h=conv(high,p+".proj_high.weight",nullptr,1,0,1,gh),l=conv(low,p+".proj_low.weight",nullptr,1,0,1,gl);l=resize(l,high.width,high.height);return bn(add(h,l),p+".bn",true);}
+VulkanExecutor::Tensor VulkanExecutor::fusion(
+    const Tensor& high, const Tensor& low, const std::string& prefix) {
+    const auto channels = static_cast<std::uint32_t>(
+        model_.tensor(prefix + ".proj_high.weight").dimensions[0]);
+    const std::uint32_t high_groups = high.channels % 4 == 0 && channels % 4 == 0 ? 4 : 1;
+    const std::uint32_t low_groups = low.channels % 4 == 0 && channels % 4 == 0 ? 4 : 1;
+    Tensor h = conv(high, prefix + ".proj_high.weight", nullptr, 1, 0, 1, high_groups);
+    Tensor l = conv(low, prefix + ".proj_low.weight", nullptr, 1, 0, 1, low_groups);
+    if (environment_enabled("ZIPDEPTH_DISABLE_DECODER_FUSION")) {
+        l = resize(l, high.width, high.height);
+        return bn(add(h, l), prefix + ".bn", true);
+    }
+    // Retain both projections and the exact resize/add/BN/ReLU operation order.
+    // A single shader avoids writing and rereading the two intermediate tensors.
+    Tensor result = make(channels, high.height, high.width);
+    extra_.decoder_fusion(result.buffer, l.buffer, h.buffer,
+        weight(prefix + ".bn.weight"), weight(prefix + ".bn.bias"),
+        weight(prefix + ".bn.running_mean"), weight(prefix + ".bn.running_var"),
+        l.width, l.height, high.width, high.height, channels);
+    return result;
+}
 
 VulkanExecutor::Tensor VulkanExecutor::infer_device(midas_native::VulkanBuffer input,std::uint32_t width,std::uint32_t height){
     if(!width||!height||width%32||height%32)throw std::invalid_argument("ZipDepth GPU input must be multiple of 32");

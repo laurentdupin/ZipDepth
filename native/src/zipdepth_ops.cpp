@@ -1,4 +1,5 @@
 #include "zipdepth_ops.h"
+#include "decoder_fusion_spv.h"
 
 #include "adaptive_average_spv.h"
 #include "channel_average_spv.h"
@@ -35,6 +36,8 @@ ZipDepthOps::ZipDepthOps(midas_native::VulkanContext& c)
       context_reduce_(c.create_pipeline(midas_context_reduce_spv,midas_context_reduce_spv_size,3,8)),
       convex_(c.create_pipeline(midas_convex_upsample_spv,midas_convex_upsample_spv_size,3,8)),
       mobile_(c.create_pipeline(midas_mobile_upsample_spv,midas_mobile_upsample_spv_size,3,8)) {
+    decoder_fusion_ = c.create_pipeline(midas_decoder_fusion_spv, midas_decoder_fusion_spv_size, 7, 24);
+    decoder_fusion_.set_debug_name("zipdepth_decoder_fusion");
     if (c.supports_float16()) {
         pointwise_fp16_weights_ = c.create_pipeline(
             midas_precision_pointwise_fp16_weights_spv,
@@ -51,6 +54,16 @@ ZipDepthOps::ZipDepthOps(midas_native::VulkanContext& c)
         spatial_int8_.set_debug_name("zipdepth_conv2d_spatial_int8");
         spatial_int8_relu_.set_debug_name("zipdepth_conv2d_spatial_int8_relu");
     }
+}
+
+void ZipDepthOps::decoder_fusion(midas_native::VulkanBuffer& out,
+    const midas_native::VulkanBuffer& low, const midas_native::VulkanBuffer& high,
+    const midas_native::VulkanBuffer& gamma, const midas_native::VulkanBuffer& beta,
+    const midas_native::VulkanBuffer& mean, const midas_native::VulkanBuffer& variance,
+    std::uint32_t iw, std::uint32_t ih, std::uint32_t ow, std::uint32_t oh, std::uint32_t channels) {
+    const std::uint32_t parameters[6] = {iw, ih, ow, oh, channels, 0};
+    context_.dispatch(decoder_fusion_, {&out, &low, &high, &gamma, &beta, &mean, &variance},
+        parameters, sizeof(parameters), up(ow, 8), up(oh, 8), channels);
 }
 
 void ZipDepthOps::elementwise(midas_native::VulkanBuffer&o,const midas_native::VulkanBuffer&a,const midas_native::VulkanBuffer&b,std::uint32_t n,std::uint32_t plane,std::uint32_t op,float scale){struct P{std::uint32_t n,plane,op;float scale;}p{n,plane,op,scale};context_.dispatch(elementwise_,{&o,&a,&b},&p,sizeof(p),up(n,256));}
