@@ -294,7 +294,10 @@ zipdepth_infer_android_hardware_buffer_vulkan_f32(
                 vk.acquire_external_image(
                     image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_ACCESS_SHADER_READ_BIT);
-                context->gpu_io->preprocess(
+                // Match HOST and desktop capture: nearest-neighbor RGB [0,1].
+                // The encoder already folds ImageNet normalization into its
+                // weights; preprocess() would normalize these pixels twice.
+                context->gpu_io->preprocess_capture(
                     input, image, network_width, network_height);
                 auto inferred = context->gpu->infer_device(
                     std::move(input), network_width, network_height);

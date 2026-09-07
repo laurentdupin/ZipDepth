@@ -91,9 +91,7 @@ if(ZIPDEPTH_WITH_VULKAN)
             normalize_relative)
         zipdepth_compile_shader(${SHADER})
     endforeach()
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        zipdepth_compile_shader(preprocess_capture)
-    endif()
+    zipdepth_compile_shader(preprocess_capture)
 endif()
 
 add_library(zipdepth_native SHARED

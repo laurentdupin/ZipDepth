@@ -29,6 +29,13 @@ def main() -> None:
 
     harness = args.harness.read_text(encoding="utf-8")
     executor = args.executor.read_text(encoding="utf-8")
+    native = (args.harness.parent / "zipdepth_native.cpp").read_text(encoding="utf-8")
+    android_input = section(native, "zipdepth_infer_android_hardware_buffer_vulkan_f32(",
+                            "zipdepth_infer_dma_buf_vulkan_f32(")
+    require("gpu_io->preprocess_capture(" in android_input and
+            "gpu_io->preprocess(" not in android_input,
+            "Android hardware buffers must use raw RGB/nearest capture preprocessing; "
+            "the encoder weights already fold normalization")
 
     dimensions = section(harness, "void network_dimensions(", "ibrh_result status_result")
     require("__ANDROID__" not in dimensions,

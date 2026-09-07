@@ -229,7 +229,9 @@ public:
                     context.acquire_external_image(
                         output, VK_IMAGE_LAYOUT_GENERAL,
                         VK_ACCESS_SHADER_WRITE_BIT);
-                    io_.preprocess(
+                    // Capture pixels use the same raw RGB/nearest resize as
+                    // HOST and Android; normalization is folded into weights.
+                    io_.preprocess_capture(
                         normalized, input,
                         static_cast<std::uint32_t>(shape.width),
                         static_cast<std::uint32_t>(shape.height));
