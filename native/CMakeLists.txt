@@ -149,6 +149,14 @@ if(WIN32 AND ZIPDEPTH_WITH_VULKAN)
 endif()
 
 include(CTest)
+if(BUILD_TESTING AND ANDROID AND ZIPDEPTH_WITH_VULKAN)
+    # Run this device executable through adb; it exercises real queue/fence
+    # behavior, including a recording failure after earlier segments submit.
+    add_executable(zipdepth_segmented_batch_recovery
+        tests/segmented_batch_recovery.cpp src/vulkan.cpp ${ZIPDEPTH_SHADER_HEADERS})
+    target_include_directories(zipdepth_segmented_batch_recovery PRIVATE src "${ZIPDEPTH_GENERATED_DIR}")
+    target_link_libraries(zipdepth_segmented_batch_recovery PRIVATE Vulkan::Vulkan android log)
+endif()
 if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME zipdepth_android_parity_contract
