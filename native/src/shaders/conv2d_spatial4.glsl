@@ -28,6 +28,15 @@ layout(push_constant) uniform Parameters {
     uint has_batch_norm; uint activation; float epsilon;
 } parameters;
 
+#if defined(STRIDE2_DIRECT)
+void accumulate_sample(inout vec4 sums, float value, uint wi, uint channel_stride) {
+    sums += value * vec4(weight_buffer.data[wi],
+        weight_buffer.data[wi + channel_stride],
+        weight_buffer.data[wi + 2 * channel_stride],
+        weight_buffer.data[wi + 3 * channel_stride]);
+}
+#endif
+
 void main() {
     const uint output_x = gl_GlobalInvocationID.x;
     const uint output_y = gl_GlobalInvocationID.y;
@@ -36,6 +45,34 @@ void main() {
         output_y >= parameters.output_height ||
         channel_base >= parameters.output_channels) return;
     float sums[4] = float[4](0.0, 0.0, 0.0, 0.0);
+#if defined(STRIDE2_DIRECT)
+    // This pipeline is selected only for 3x3, stride 2, pad 1, four complete
+    // output channels. Border pixels retain the generic path below.
+    const uint ix = output_x * 2;
+    const uint iy = output_y * 2;
+    if (ix > 0 && iy > 0 && ix + 1 < parameters.input_width && iy + 1 < parameters.input_height) {
+        vec4 direct_sums = vec4(0.0);
+        const uint plane = parameters.input_width * parameters.input_height;
+        const uint channel_stride = parameters.input_channels * 9;
+        uint input_index = (iy - 1) * parameters.input_width + ix - 1;
+        uint wi = channel_base * channel_stride;
+        for (uint ic = 0; ic < parameters.input_channels; ++ic) {
+            accumulate_sample(direct_sums, input_buffer.data[input_index], wi, channel_stride);
+            accumulate_sample(direct_sums, input_buffer.data[input_index + 1], wi + 1, channel_stride);
+            accumulate_sample(direct_sums, input_buffer.data[input_index + 2], wi + 2, channel_stride);
+            accumulate_sample(direct_sums, input_buffer.data[input_index + parameters.input_width], wi + 3, channel_stride);
+            accumulate_sample(direct_sums, input_buffer.data[input_index + parameters.input_width + 1], wi + 4, channel_stride);
+            accumulate_sample(direct_sums, input_buffer.data[input_index + parameters.input_width + 2], wi + 5, channel_stride);
+            accumulate_sample(direct_sums, input_buffer.data[input_index + 2 * parameters.input_width], wi + 6, channel_stride);
+            accumulate_sample(direct_sums, input_buffer.data[input_index + 2 * parameters.input_width + 1], wi + 7, channel_stride);
+            accumulate_sample(direct_sums, input_buffer.data[input_index + 2 * parameters.input_width + 2], wi + 8, channel_stride);
+            input_index += plane;
+            wi += 9;
+        }
+        for (uint i = 0; i < 4; ++i) sums[i] = direct_sums[i];
+    } else
+#endif
+    {
     for (uint input_channel = 0;
          input_channel < parameters.input_channels;
          ++input_channel) {
@@ -68,6 +105,7 @@ void main() {
                 }
             }
         }
+    }
     }
     for (uint offset = 0; offset < 4; ++offset) {
         const uint channel = channel_base + offset;

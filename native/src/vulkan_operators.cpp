@@ -10,6 +10,7 @@
 #include "conv2d_pointwise_gemm_residual_spv.h"
 #include "conv2d_depthwise3_spv.h"
 #include "conv2d_spatial4_spv.h"
+#include "conv2d_spatial4_stride2_direct_spv.h"
 #include "conv2d_spatial4_tiled_spv.h"
 #include "conv2d_spatial4_tiled_oc4_spv.h"
 #include "conv2d_spatial4_stride2_tiled_spv.h"
@@ -66,6 +67,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           midas_conv2d_spatial4_spv_size,
           4,
           68)),
+      conv_spatial4_stride2_direct_(context.create_pipeline(
+          midas_conv2d_spatial4_stride2_direct_spv,
+          midas_conv2d_spatial4_stride2_direct_spv_size, 4, 68)),
       conv_spatial4_tiled_(context.create_pipeline(
           midas_conv2d_spatial4_tiled_spv,
           midas_conv2d_spatial4_tiled_spv_size,
@@ -124,6 +128,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         "midas_conv2d_pointwise_gemm_residual");
     conv_depthwise3_.set_debug_name("midas_conv2d_depthwise3");
     conv_spatial4_.set_debug_name("midas_conv2d_spatial4");
+    conv_spatial4_stride2_direct_.set_debug_name("midas_conv2d_spatial4_stride2_direct");
+    const char* direct = std::getenv("ZIPDEPTH_ENABLE_STRIDE2_DIRECT");
+    enable_spatial_stride2_direct_ = direct == nullptr || environment_enabled("ZIPDEPTH_ENABLE_STRIDE2_DIRECT");
     conv_spatial4_tiled_.set_debug_name(
         "midas_conv2d_spatial4_tiled");
     conv_spatial4_tiled_oc4_.set_debug_name(
@@ -212,6 +219,8 @@ void VulkanOperators::conv(
     const bool spatial4_stride2_tiled = spatial4 &&
         enable_spatial_stride2_tiled_ && stride == 2 &&
         padding_top == 1 && padding_left == 1;
+    const bool spatial4_stride2_direct = spatial4 && enable_spatial_stride2_direct_ &&
+        stride == 2 && padding_top == 1 && padding_left == 1 && output_channels % 4 == 0;
     const bool spatial4_tiled_small =
         spatial4_tiled && !relu_input &&
         output_width <= 8 && output_height <= 4;
@@ -247,7 +256,7 @@ void VulkanOperators::conv(
                 ? conv_spatial4_tiled_relu_
                 : conv_spatial4_tiled_))
             :
-        (spatial4 ? conv_spatial4_ : conv_))));
+        (spatial4 ? (spatial4_stride2_direct ? conv_spatial4_stride2_direct_ : conv_spatial4_) : conv_))));
     std::vector<const VulkanBuffer*> resources{
         &output, &input, &weight, &bias};
     if (residual != nullptr) {

@@ -74,6 +74,7 @@ private:
     VulkanPipeline conv_pointwise_gemm_residual_;
     VulkanPipeline conv_depthwise3_;
     VulkanPipeline conv_spatial4_;
+    VulkanPipeline conv_spatial4_stride2_direct_;
     VulkanPipeline conv_spatial4_tiled_;
     VulkanPipeline conv_spatial4_tiled_oc4_;
     VulkanPipeline conv_spatial4_stride2_tiled_;
@@ -85,6 +86,7 @@ private:
     VulkanPipeline bilinear_;
     bool use_spatial_tiled_oc4_ = false;
     bool enable_spatial_stride2_tiled_ = false;
+    bool enable_spatial_stride2_direct_ = false;
 };
 
 }  // namespace midas_native

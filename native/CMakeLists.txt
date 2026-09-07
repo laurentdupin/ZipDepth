@@ -49,6 +49,8 @@ if(ZIPDEPTH_WITH_VULKAN)
     zipdepth_compile_shader(conv2d_pointwise_gemm_residual conv2d_pointwise_gemm -DADD_RESIDUAL=1)
     zipdepth_compile_shader(conv2d_depthwise3 conv2d_depthwise3 -DNO_BATCH_NORM=1)
     zipdepth_compile_shader(conv2d_spatial4 conv2d_spatial4 -DNO_BATCH_NORM=1)
+    zipdepth_compile_shader(conv2d_spatial4_stride2_direct conv2d_spatial4
+        -DNO_BATCH_NORM=1 -DSTRIDE2_DIRECT=1)
     zipdepth_compile_shader(conv2d_spatial4_tiled conv2d_spatial4_tiled
         -DNO_BATCH_NORM=1 -DLOCAL_X=16 -DLOCAL_Y=4)
     zipdepth_compile_shader(conv2d_spatial4_tiled_oc4 conv2d_spatial4_tiled
