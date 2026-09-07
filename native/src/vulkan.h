@@ -490,7 +490,7 @@ private:
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
     bool batch_has_dispatch_ = false;
     bool batch_segmenting_enabled_ = false;
-    std::uint32_t android_batch_dispatch_limit_ = 16;
+    std::uint32_t android_batch_dispatch_limit_ = 4;
     std::uint32_t last_external_segment_count_ = 0;
     VulkanSemaphore batch_segment_wait_;
     std::uint32_t batch_dispatch_count_ = 0;
