@@ -10,6 +10,7 @@
 #include <utility>
 #if defined(__ANDROID__)
 #include <android/hardware_buffer.h>
+#include <android/log.h>
 #endif
 #if defined(__ANDROID__) || defined(__linux__)
 #include <unistd.h>
@@ -479,6 +480,11 @@ VulkanContext::VulkanContext(
         profile_environment[0] != '0' &&
         family->timestampValidBits != 0;
     timestamp_period_ns_ = properties.limits.timestampPeriod;
+    timestamp_mask_ = family->timestampValidBits == 64 ? ~std::uint64_t{0}
+        : (std::uint64_t{1} << family->timestampValidBits) - 1;
+    const char* external_profile = std::getenv("ZIPDEPTH_PROFILE_EXTERNAL");
+    profile_external_ = external_profile && external_profile[0] == '1' &&
+        family->timestampValidBits != 0;
     if (const char* limit = std::getenv("ZIPDEPTH_ANDROID_BATCH_DISPATCH_LIMIT")) {
         char* end = nullptr;
         const auto parsed = std::strtoul(limit, &end, 10);
@@ -644,13 +650,13 @@ VulkanContext::VulkanContext(
         vkCreateDescriptorPool(
             device_, &descriptor_pool_info, nullptr, &descriptor_pool_),
         "vkCreateDescriptorPool");
-    if (profile_dispatches_) {
+    if (profile_dispatches_ || profile_external_) {
         const VkQueryPoolCreateInfo query_pool_info{
             VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
             nullptr,
             0,
             VK_QUERY_TYPE_TIMESTAMP,
-            2,
+            profile_external_ ? external_profile_queries_ : 2u,
             0,
         };
         check(
@@ -708,6 +714,41 @@ void VulkanContext::release() noexcept {
         vkDestroyInstance(instance_, nullptr);
         instance_ = VK_NULL_HANDLE;
     }
+}
+
+void VulkanContext::begin_external_profile() {
+    external_profile_names_.clear();
+    // Sample after initial warmup, without changing submission boundaries or
+    // inserting any additional fence wait into the normal playback path.
+    external_profile_active_ = profile_external_ && ++external_profile_frame_ > 5 &&
+        external_profile_frame_ % 30 == 6;
+}
+
+void VulkanContext::finish_external_profile() {
+    if (!external_profile_active_) return;
+    external_profile_active_ = false;
+    const auto count = static_cast<std::uint32_t>(external_profile_names_.size());
+    if (!count) return;
+    std::vector<std::uint64_t> ticks(count * 2);
+    // The caller has already waited for the final inference fence. No WAIT
+    // flag, queue-idle operation, or per-operator synchronization is needed.
+    check(vkGetQueryPoolResults(device_, profile_query_pool_, 0, count * 2,
+        ticks.size() * sizeof(std::uint64_t), ticks.data(), sizeof(std::uint64_t),
+        VK_QUERY_RESULT_64_BIT), "external profile query results");
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const double ms = static_cast<double>((ticks[2*i+1] - ticks[2*i]) & timestamp_mask_)
+            * timestamp_period_ns_ / 1.0e6;
+#if defined(__ANDROID__)
+        __android_log_print(ANDROID_LOG_INFO, "ZipDepthGPU",
+            "frame=%llu op=%u ms=%.6f %s", static_cast<unsigned long long>(external_profile_frame_),
+            i, ms, external_profile_names_[i].c_str());
+#else
+        std::fprintf(stderr, "ZipDepthGPU frame=%llu op=%u ms=%.6f %s\n",
+            static_cast<unsigned long long>(external_profile_frame_), i, ms,
+            external_profile_names_[i].c_str());
+#endif
+    }
+    external_profile_names_.clear();
 }
 
 void VulkanContext::record_profile(
@@ -2222,7 +2263,7 @@ void VulkanContext::dispatch_resources(
     VkCommandBuffer command =
         batched ? batch_command_ : begin_commands();
     const bool profile =
-        !batched && profile_query_pool_ != VK_NULL_HANDLE;
+        !batched && profile_dispatches_ && profile_query_pool_ != VK_NULL_HANDLE;
     if (profile) {
         vkCmdResetQueryPool(
             command, profile_query_pool_, 0, 2);
@@ -2373,7 +2414,27 @@ void VulkanContext::dispatch_resources(
             push_constant_bytes,
             push_constants);
     }
+    const bool external_profile = batched && external_profile_active_ &&
+        external_profile_names_.size() < external_profile_queries_ / 2;
+    const auto external_query = static_cast<std::uint32_t>(external_profile_names_.size() * 2);
+    if (external_profile) {
+        std::string name = pipeline.debug_name_ + " groups=" + std::to_string(group_x) +
+            "x" + std::to_string(group_y) + "x" + std::to_string(group_z) + " pc=";
+        for (std::uint32_t offset = 0; offset + 4 <= push_constant_bytes && offset < 52; offset += 4) {
+            std::uint32_t value;
+            std::memcpy(&value, static_cast<const char*>(push_constants) + offset, 4);
+            name += std::to_string(value) + ",";
+        }
+        external_profile_names_.push_back(std::move(name));
+        vkCmdResetQueryPool(command, profile_query_pool_, external_query, 2);
+        vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            profile_query_pool_, external_query);
+    }
     vkCmdDispatch(command, group_x, group_y, group_z);
+    if (external_profile) {
+        vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            profile_query_pool_, external_query + 1);
+    }
     if (profile) {
         vkCmdWriteTimestamp(
             command,

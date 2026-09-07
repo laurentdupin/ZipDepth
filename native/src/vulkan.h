@@ -362,6 +362,7 @@ public:
         begin_batch();
         batch_segment_wait_ = std::move(wait);
         batch_segmenting_enabled_ = true;
+        begin_external_profile();
         try {
             std::forward<Function>(function)();
             batch_segmenting_enabled_ = false;
@@ -370,6 +371,7 @@ public:
             batch_segments_.push_back(end_batch_async(std::move(batch_segment_wait_), {}));
             last_external_segment_count_ = static_cast<std::uint32_t>(batch_segments_.size());
             batch_segments_.back().wait();
+            finish_external_profile();
             batch_segments_.clear();
         } catch (...) {
             batch_segmenting_enabled_ = false;
@@ -381,6 +383,8 @@ public:
             cancel_batch();
             batch_segments_.clear();
             batch_segment_wait_ = {};
+            external_profile_active_ = false;
+            external_profile_names_.clear();
             throw;
         }
     }
@@ -465,6 +469,8 @@ private:
         std::uint32_t group_z,
         std::uint64_t ticks);
     void print_profile() const noexcept;
+    void begin_external_profile();
+    void finish_external_profile();
 
     struct ProfileStat {
         std::uint64_t total_ticks = 0;
@@ -483,6 +489,12 @@ private:
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     VkQueryPool profile_query_pool_ = VK_NULL_HANDLE;
     bool profile_dispatches_ = false;
+    bool profile_external_ = false;
+    bool external_profile_active_ = false;
+    std::uint64_t external_profile_frame_ = 0;
+    std::uint64_t timestamp_mask_ = ~std::uint64_t{0};
+    std::vector<std::string> external_profile_names_;
+    static constexpr std::uint32_t external_profile_queries_ = 4096;
     bool subgroup_size_forced_ = false;
     bool float16_supported_ = false;
     bool packed_int8_dot_supported_ = false;
