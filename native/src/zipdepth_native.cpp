@@ -289,8 +289,8 @@ zipdepth_infer_android_hardware_buffer_vulkan_f32(
         auto input = vk.create_device_buffer(
             std::uint64_t(3u) * network_width * network_height * sizeof(float));
         midas_native::VulkanBuffer output;
-        auto submission = vk.batch_async(
-            std::move(wait), {}, [&] {
+        vk.batch_external_segmented(
+            std::move(wait), [&] {
                 vk.acquire_external_image(
                     image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_ACCESS_SHADER_READ_BIT);
@@ -308,7 +308,6 @@ zipdepth_infer_android_hardware_buffer_vulkan_f32(
                     image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_ACCESS_SHADER_READ_BIT);
             });
-        submission.wait();
         const auto inferred_at = Clock::now();
         vk.download(output, depth,
             static_cast<std::size_t>(
@@ -322,12 +321,12 @@ zipdepth_infer_android_hardware_buffer_vulkan_f32(
                     end - begin).count();
             };
             __android_log_print(ANDROID_LOG_INFO, "ZipDepthAHB",
-                "frame=%llu cached=%d import=%.3f gpu=%.3f download=%.3f total=%.3f",
+                "frame=%llu cached=%d import=%.3f gpu=%.3f download=%.3f total=%.3f segments=%u",
                 static_cast<unsigned long long>(current), cache_hit ? 1 : 0,
                 milliseconds(started, imported_at),
                 milliseconds(imported_at, inferred_at),
                 milliseconds(inferred_at, finished),
-                milliseconds(started, finished));
+                milliseconds(started, finished), vk.last_external_segment_count());
         }
     });
 #endif

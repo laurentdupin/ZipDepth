@@ -351,6 +351,40 @@ public:
         }
     }
 
+    // Synchronous external-image batch, split on the same ordered queue.
+    // Retain every segment until the final fence completes. The acquire
+    // semaphore belongs to the first submission, not the final one.
+    template <typename Function>
+    void batch_external_segmented(VulkanSemaphore wait, Function&& function) {
+        if (batch_command_ != VK_NULL_HANDLE) {
+            throw std::logic_error("external segmented batch cannot be nested");
+        }
+        begin_batch();
+        batch_segment_wait_ = std::move(wait);
+        batch_segmenting_enabled_ = true;
+        try {
+            std::forward<Function>(function)();
+            batch_segmenting_enabled_ = false;
+            // Submit even when the last dispatch ended a segment: the final
+            // command buffer still contains the external-image release.
+            batch_segments_.push_back(end_batch_async(std::move(batch_segment_wait_), {}));
+            last_external_segment_count_ = static_cast<std::uint32_t>(batch_segments_.size());
+            batch_segments_.back().wait();
+            batch_segments_.clear();
+        } catch (...) {
+            batch_segmenting_enabled_ = false;
+            cancel_batch();
+            if (!batch_segments_.empty()) {
+                try { batch_segments_.back().wait(); } catch (...) {}
+                batch_segments_.clear();
+            }
+            batch_segment_wait_ = {};
+            throw;
+        }
+    }
+
+    std::uint32_t last_external_segment_count() const { return last_external_segment_count_; }
+
     template <typename Function>
     VulkanSubmission batch_async(
         VulkanSemaphore wait,
@@ -456,6 +490,9 @@ private:
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
     bool batch_has_dispatch_ = false;
     bool batch_segmenting_enabled_ = false;
+    std::uint32_t android_batch_dispatch_limit_ = 16;
+    std::uint32_t last_external_segment_count_ = 0;
+    VulkanSemaphore batch_segment_wait_;
     std::uint32_t batch_dispatch_count_ = 0;
     std::vector<VulkanSubmission> batch_segments_;
     bool track_resource_hazards_ = true;

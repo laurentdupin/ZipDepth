@@ -479,6 +479,14 @@ VulkanContext::VulkanContext(
         profile_environment[0] != '0' &&
         family->timestampValidBits != 0;
     timestamp_period_ns_ = properties.limits.timestampPeriod;
+    if (const char* limit = std::getenv("ZIPDEPTH_ANDROID_BATCH_DISPATCH_LIMIT")) {
+        char* end = nullptr;
+        const auto parsed = std::strtoul(limit, &end, 10);
+        if (end == limit || *end != '\0' || parsed > 256) {
+            throw std::invalid_argument("Android batch dispatch limit must be 0..256");
+        }
+        android_batch_dispatch_limit_ = static_cast<std::uint32_t>(parsed);
+    }
     if (profile_environment && profile_environment[0] && profile_environment[0] != '0') {
         std::fprintf(stderr, "ZipDepth profiling requested: enabled=%d timestamp_bits=%u period_ns=%g\n",
             profile_dispatches_, family->timestampValidBits, timestamp_period_ns_);
@@ -2387,10 +2395,9 @@ void VulkanContext::dispatch_resources(
         // scheduled between them. Segments are submitted asynchronously on
         // the ordered compute queue; only the final segment is waited, rather
         // than blocking the CPU and GPU after every small group.
-        constexpr std::uint32_t kAndroidBatchDispatchLimit = 16;
-        if (batch_segmenting_enabled_ &&
-            batch_dispatch_count_ >= kAndroidBatchDispatchLimit) {
-            batch_segments_.push_back(end_batch_async({}, {}));
+        if (batch_segmenting_enabled_ && android_batch_dispatch_limit_ != 0 &&
+            batch_dispatch_count_ >= android_batch_dispatch_limit_) {
+            batch_segments_.push_back(end_batch_async(std::move(batch_segment_wait_), {}));
             begin_batch();
             const VkMemoryBarrier continuation_barrier{
                 VK_STRUCTURE_TYPE_MEMORY_BARRIER,
