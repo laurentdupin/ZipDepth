@@ -38,6 +38,9 @@ struct ibrh_runtime {
 };
 
 namespace { class ZipDepthGpuWorker; class ZipDepthHostWorker; }
+#if defined(ZIPDEPTH_WITH_VULKAN) || defined(ZIPDEPTH_WITH_METAL)
+namespace { void retire_zip_job(std::weak_ptr<ZipDepthGpuWorker>, std::shared_ptr<zipdepth_native::ExternalJob>); }
+#endif
 
 namespace {
 
@@ -95,6 +98,7 @@ struct ibrh_job {
 #if defined(ZIPDEPTH_WITH_VULKAN) || defined(ZIPDEPTH_WITH_METAL)
     mutable std::mutex gpu_mutex;
     std::shared_ptr<zipdepth_native::ExternalJob> gpu_job;
+    std::weak_ptr<ZipDepthGpuWorker> gpu_worker;
 #endif
     uint64_t source_frame_id = 0u;
     uint64_t timestamp_ns = 0u;
@@ -104,6 +108,9 @@ struct ibrh_job {
     std::shared_ptr<std::atomic<uint32_t>> gpu_admission;
     std::vector<uint8_t> depth;
     ~ibrh_job() {
+#if defined(ZIPDEPTH_WITH_VULKAN) || defined(ZIPDEPTH_WITH_METAL)
+        if (gpu_job) retire_zip_job(gpu_worker, std::move(gpu_job));
+#endif
         if (gpu_admission) gpu_admission->fetch_sub(1u);
     }
 };
@@ -494,6 +501,13 @@ public:
         if (thread_.joinable()) thread_.join();
     }
 
+    void retire(std::shared_ptr<zipdepth_native::ExternalJob> job) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!exited_) retired_.push_back(std::move(job));
+        }
+        condition_.notify_one();
+    }
     bool enqueue(
         ibrh_job* job,
         const zipdepth_native::ExternalTextureRequest& request) {
@@ -520,15 +534,18 @@ private:
     void run() {
         for (;;) {
             Work work{};
+            std::deque<std::shared_ptr<zipdepth_native::ExternalJob>> retired;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 condition_.wait(lock, [this] {
-                    return stopping_ || !queue_.empty();
+                    return stopping_ || !queue_.empty() || !retired_.empty();
                 });
-                if (stopping_ && queue_.empty()) return;
-                work = queue_.front();
-                queue_.pop_front();
+                if (stopping_ && queue_.empty() && retired_.empty()) { exited_ = true; return; }
+                retired.swap(retired_);
+                if (!queue_.empty()) { work = queue_.front(); queue_.pop_front(); }
             }
+            retired.clear();
+            if (!work.job) continue;
             uint32_t queued = IBRH_JOB_QUEUED;
             if (work.job->state.compare_exchange_strong(
                     queued, IBRH_JOB_RUNNING)) {
@@ -550,9 +567,15 @@ private:
     std::mutex mutex_;
     std::condition_variable condition_;
     std::deque<Work> queue_;
+    std::deque<std::shared_ptr<zipdepth_native::ExternalJob>> retired_;
+    bool exited_ = false;
     bool stopping_ = false;
     std::thread thread_;
 };
+void retire_zip_job(std::weak_ptr<ZipDepthGpuWorker> worker, std::shared_ptr<zipdepth_native::ExternalJob> job) {
+    if (auto active = worker.lock()) active->retire(std::move(job));
+}
+
 #endif
 
 ibrh_result IBRH_CALL query_capabilities(
@@ -890,8 +913,8 @@ ibrh_result IBRH_CALL submit(
         job->timestamp_ns = request->timestamp_ns;
         job->width = input.width; job->height = input.height;
         job->gpu_backed = true;
-        if (!model->gpu_worker ||
-            !model->gpu_worker->enqueue(job, gpu_request)) {
+        job->gpu_worker = model->gpu_worker;
+        if (!model->gpu_worker || !model->gpu_worker->enqueue(job, gpu_request)) {
             delete job;
             return IBRH_ERROR_INVALID_STATE;
         }
@@ -946,8 +969,8 @@ ibrh_result IBRH_CALL submit(
         job->width = input.width;
         job->height = input.height;
         job->gpu_backed = true;
-        if (!model->gpu_worker ||
-            !model->gpu_worker->enqueue(job, gpu_request)) {
+        job->gpu_worker = model->gpu_worker;
+        if (!model->gpu_worker || !model->gpu_worker->enqueue(job, gpu_request)) {
             delete job;
             return IBRH_ERROR_INVALID_STATE;
         }
