@@ -1,6 +1,7 @@
 #include "model.h"
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -47,7 +48,9 @@ bool range(std::uint64_t offset, std::uint64_t bytes, std::uint64_t limit) {
 
 ModelFile::ModelFile(const std::string& path_utf8) {
     if (path_utf8.empty()) throw std::invalid_argument("model path is empty");
-    std::ifstream source(path_utf8, std::ios::binary | std::ios::ate);
+    // The native ABI supplies UTF-8; narrow Windows streams use the ANSI code page.
+    std::ifstream source(std::filesystem::u8path(path_utf8),
+                         std::ios::binary | std::ios::ate);
     if (!source) throw std::runtime_error("failed to open ZipDepth model");
     const auto end = source.tellg();
     if (end < 0 || static_cast<std::uint64_t>(end) >

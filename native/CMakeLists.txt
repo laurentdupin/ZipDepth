@@ -160,6 +160,9 @@ if(BUILD_TESTING AND ANDROID AND ZIPDEPTH_WITH_VULKAN)
     target_link_libraries(zipdepth_segmented_batch_recovery PRIVATE Vulkan::Vulkan android log)
 endif()
 if(BUILD_TESTING)
+    add_executable(zipdepth_model_unicode_path tests/model_unicode_path.cpp src/model.cpp)
+    target_include_directories(zipdepth_model_unicode_path PRIVATE include src)
+    add_test(NAME zipdepth_model_unicode_path COMMAND zipdepth_model_unicode_path)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME zipdepth_android_parity_contract
         COMMAND "${Python3_EXECUTABLE}"
