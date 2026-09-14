@@ -1,4 +1,5 @@
 #include "vulkan.h"
+#include "inferbridge/native_harness_vulkan_queue_priority.h"
 #include <inferbridge/native_harness_linux_dma_buf.h>
 
 #include <algorithm>
@@ -587,7 +588,7 @@ VulkanContext::VulkanContext(
         nullptr,
     };
     check(
-        vkCreateDevice(physical_device_, &device_info, nullptr, &device_),
+        inferbridge::native_harness::create_inference_vulkan_device(physical_device_, &device_info, nullptr, &device_),
         "vkCreateDevice");
 #if defined(_WIN32)
     get_memory_win32_handle_properties_ =
